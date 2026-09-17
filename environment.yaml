@@ -1,0 +1,48 @@
+# Environment for the tutorial.
+#
+#   mamba env create -f environment.yml          # or: conda env create -f ...
+#   mamba activate nest38
+#   python -m ipykernel install --user --name nest38 --display-name "Python (NEST 3.8)"
+#
+# Then verify NEST before anything else:
+#   python -c "import nest; print(nest.__version__)"      # expect 3.8.0
+#
+# Windows: run this inside WSL2. NEST has no native Windows build.
+name: nest3.8
+
+channels:
+  - conda-forge
+
+dependencies:
+  # ---- the simulator -------------------------------------------------------
+  # Version-sensitive: the model targets the NEST 3.8 API.
+  - python=3.12
+  - nest-simulator=3.8
+
+  # ---- the scientific stack the model and the analysis need ----------------
+  - numpy=2.2
+  - pandas=2.2
+  - scipy=1.15
+  - matplotlib-base=3.10
+  - seaborn=0.13
+  - h5py
+  - pyyaml          # parameter dumps (net.yaml / sim.yaml)
+  - colorlog        # the pipeline's coloured logging
+  - joblib          # parallel BOLD integration
+  - xlrd            # reads the von Economo-Koskinas cytoarchitecture .xls
+  - psutil          # reports available RAM in the notebook
+
+  # ---- notebook ------------------------------------------------------------
+  - jupyterlab
+  - ipykernel
+
+  - pip
+  - pip:
+      # Hash-addressed output directories. Not on conda-forge.
+      - dicthash==0.0.1
+      # Mean-field theory, used by tools/eta_ext_search.py --method theory.
+      - nnmt==1.3.0
+
+# Optional, and not worth the solve time unless you want it: a workflow manager
+# to drive the three pipeline stages instead of calling them yourself.
+#   mamba install -c conda-forge -c bioconda snakemake
