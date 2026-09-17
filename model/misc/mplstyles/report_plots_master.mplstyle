@@ -1,0 +1,20 @@
+font.family  : sans-serif
+font.size    : 6.0
+font.sans-serif : DejaVu Sans
+
+lines.linewidth : 1.0         ## line width in points
+lines.markeredgewidth : 0.0   ## the line width around the marker symbol
+lines.markersize      : 1.0   ## marker size, in points
+
+axes.linewidth     : 1.0      ## edge linewidth
+
+xtick.major.size    : 4       ## major tick size in points
+xtick.major.width   : 1.0     ## major tick width in points
+ytick.major.size    : 4       ## major tick size in points
+ytick.major.width   : 1.0     ## major tick width in points
+
+figure.figsize     : 3.0, 2.0         ## figure size in inches
+figure.constrained_layout.use : True  ## When True, automatically make plot
+                                      ## elements fit on the figure.
+
+figure.dpi         : 300       ## figure dots per inch

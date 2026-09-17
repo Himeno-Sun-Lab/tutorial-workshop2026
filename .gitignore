@@ -216,3 +216,12 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# --- tutorial output -------------------------------------------------------
+results/
+# pipeline stage markers and generated seed variants
+experiments/*_hash
+experiments/*_seed*.py
+.ipynb_checkpoints/
+
+.vscode
