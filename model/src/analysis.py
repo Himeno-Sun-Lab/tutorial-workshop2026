@@ -30,6 +30,27 @@ from joblib import Parallel, delayed
 import multiprocessing
 from multiprocessing import Pool
 
+def safe_corrcoef(a, b):
+    """Pearson correlation of two flattened connectivity triangles, or NaN.
+
+    ``np.corrcoef`` fails with an opaque "inhomogeneous shape" ValueError when
+    the two inputs have different lengths, which happens as soon as one of the
+    two connectivity matrices contains NaNs: a silent network gives every area a
+    constant synaptic input current, so its correlation matrix is all-NaN and the
+    vector extracted from it is empty. Such a run has no functional connectivity
+    to report - NaN is the answer, not a crash halfway through the stage.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.size != b.size or a.size < 2:
+        return np.nan
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        return np.nan
+    if a.std() == 0 or b.std() == 0:
+        return np.nan
+    return np.corrcoef(a, b)[0, 1]
+
+
 def timeit(method):
     def timed(*args, **kw):
         ts = time.time()
@@ -3287,9 +3308,7 @@ class Analysis():
 
         # Correlate simulated functional connectivity based on synaptic
         # currents and calculated BOLD signal
-        sim_fc_bold__sim_fc_syn__corr = np.corrcoef(
-                [sim_fc_bold, sim_fc_syn]
-                )[0,1]
+        sim_fc_bold__sim_fc_syn__corr = safe_corrcoef(sim_fc_bold, sim_fc_syn)
 
         # This is PEP 8 conform, but is it really nice?
         outfile.write(
@@ -3397,13 +3416,13 @@ class Analysis():
                 exp_fc_array_lh.append(tmp_lh)
                 exp_fc_array_rh.append(tmp_rh)
 
-                exp_fc__sim_fc_syn__tmp_lh = np.corrcoef(sim_fc_syn, tmp_lh)[0, 1]
-                exp_fc__sim_fc_syn__tmp_rh = np.corrcoef(sim_fc_syn, tmp_rh)[0, 1]
+                exp_fc__sim_fc_syn__tmp_lh = safe_corrcoef(sim_fc_syn, tmp_lh)
+                exp_fc__sim_fc_syn__tmp_rh = safe_corrcoef(sim_fc_syn, tmp_rh)
                 exp_fc__sim_fc_syn__array_lh.append(exp_fc__sim_fc_syn__tmp_lh)
                 exp_fc__sim_fc_syn__array_rh.append(exp_fc__sim_fc_syn__tmp_rh)
 
-                exp_fc__sim_fc_bold__tmp_lh = np.corrcoef(sim_fc_bold, tmp_lh)[0, 1]
-                exp_fc__sim_fc_bold__tmp_rh = np.corrcoef(sim_fc_bold, tmp_rh)[0, 1]
+                exp_fc__sim_fc_bold__tmp_lh = safe_corrcoef(sim_fc_bold, tmp_lh)
+                exp_fc__sim_fc_bold__tmp_rh = safe_corrcoef(sim_fc_bold, tmp_rh)
                 exp_fc__sim_fc_bold__array_lh.append(exp_fc__sim_fc_bold__tmp_lh)
                 exp_fc__sim_fc_bold__array_rh.append(exp_fc__sim_fc_bold__tmp_rh)
 
@@ -3473,21 +3492,13 @@ class Analysis():
 
             # Correlation experimental functional connectivity with simulated
             # functional connectivity based on synaptic currents
-            exp__sim_syn__corr_lh = np.corrcoef(
-                    [exp_fc_mean_lh, sim_fc_syn]
-                    )[0,1]
-            exp__sim_syn__corr_rh = np.corrcoef(
-                    [exp_fc_mean_rh, sim_fc_syn]
-                    )[0,1]
+            exp__sim_syn__corr_lh = safe_corrcoef(exp_fc_mean_lh, sim_fc_syn)
+            exp__sim_syn__corr_rh = safe_corrcoef(exp_fc_mean_rh, sim_fc_syn)
 
             # Correlation experimental functional connectivity with simulated
             # functional connectivity based on calculated BOLD signal
-            exp__sim_bold__corr_lh = np.corrcoef(
-                    [exp_fc_mean_lh, sim_fc_bold]
-                    )[0,1]
-            exp__sim_bold__corr_rh = np.corrcoef(
-                    [exp_fc_mean_rh, sim_fc_bold]
-                    )[0,1]
+            exp__sim_bold__corr_lh = safe_corrcoef(exp_fc_mean_lh, sim_fc_bold)
+            exp__sim_bold__corr_rh = safe_corrcoef(exp_fc_mean_rh, sim_fc_bold)
 
             outfile.write(
                     ('exp__sim_syn__corr_lh: '
@@ -4963,8 +4974,9 @@ def _fc_similarity(mat_a, mat_b):
     b = np.asarray(mat_b)
     iu = np.triu_indices_from(a, k=1)
     va, vb = a[iu], b[iu]
-    pearson_r = np.corrcoef(va, vb)[0, 1]
-    cosine_sim = np.dot(va, vb) / (np.linalg.norm(va) * np.linalg.norm(vb))
+    pearson_r = safe_corrcoef(va, vb)
+    norms = np.linalg.norm(va) * np.linalg.norm(vb)
+    cosine_sim = np.dot(va, vb) / norms if norms else np.nan
     return pearson_r, cosine_sim
 
 
