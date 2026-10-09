@@ -101,6 +101,13 @@ def main(argv=None):
     ees.nested_dict_update(params, exp["net_params"], loggers[0])
     params["outpath"] = str(args.workdir / "networks")
     params["mode"] = "WARNING"
+    if args.eta is not None and params.get("neuron_types"):
+        # Rates at another drive only serve to recalibrate eta_ext, and a
+        # pathological experiment keeps the drive of its healthy control.
+        sys.exit(f"{args.experiment.name} declares neuron types "
+                 f"({', '.join(params['neuron_types'])}): its full-scale rates "
+                 "belong to its own eta_ext, taken from its healthy control. "
+                 "--eta is for calibrating the healthy control; omit it here.")
     if args.eta is not None:
         params["input_params"]["eta_ext"] = float(args.eta)
     eta = params["input_params"]["eta_ext"]

@@ -24,7 +24,7 @@ import seaborn as sns
 from dicthash import dicthash
 
 from helpers.resting_state_networks import left_ordering
-from helpers.abeta import resolve_abeta_ratio, abeta_ratio_is_zero
+from helpers.neuron_types import BASE_TYPE, active_neuron_types, type_fractions
 
 from joblib import Parallel, delayed
 import multiprocessing
@@ -97,9 +97,6 @@ class Analysis():
         self.popGids = self._readPopGids()
         self.logger.info('Reading spikes')
         self.spikes = self._readSpikes()
-        # if self.net_dict["Abeta"]:
-        #     self.logger.info('Reading Abeta-popGids')
-        #     self.AbetaGids = self._readAbetaPopGids()
         if "I_syn" in self.sim_dict["rec_dev"]:
             self.logger.info('Reading post-synaptic currents')
             self.I_syn = self._readIsyn()
@@ -110,23 +107,112 @@ class Analysis():
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _abeta_active(self):
+    def _active_neuron_types(self):
         """
-        Whether the network actually contains amyloid-affected neurons.
+        Names of the custom neuron types the network actually contains.
 
-        True only if the ``Abeta`` flag is set *and* at least one population has
-        a non-zero Abeta ratio. When ``Abeta`` is enabled but every ratio
-        resolves to 0 (scalar 0, an all-zero dict, or both E and I disabled) no
-        Abeta neurons were created, so the analysis must behave as the plain
-        (non-Abeta) case — otherwise it would read an empty Abeta GID file or
-        blend a redundant kernel.
+        A type whose ratios resolve to 0 everywhere created no neurons, so the
+        analysis must treat it as absent - otherwise it would plot an empty
+        type raster or blend a redundant kernel.
         """
-        if not self.net_dict.get('Abeta', False):
-            return False
-        return not (
-            abeta_ratio_is_zero(self.net_dict.get('Abeta_ratio_E', 0.0))
-            and abeta_ratio_is_zero(self.net_dict.get('Abeta_ratio_I', 0.0))
-        )
+        return active_neuron_types(self.net_dict.get('neuron_types'))
+
+    def _populationParam(self, area, layer, pop, key):
+        """
+        Neuron parameter of a population, averaged over its neuron types.
+
+        Parameters
+        ----------
+        area, layer, pop : str
+            Population.
+        key : str
+            Neuron parameter, e.g. ``'t_ref'``.
+
+        Returns
+        -------
+        float
+            ``sum_t f_t * p_t`` over the neuron types and the base neurons,
+            weighted by their fractions in the population.
+        """
+        neuron_types = self.net_dict.get('neuron_types') or {}
+        base = self.net_dict['neuron_params_' + pop][key]
+        value, f_base = 0.0, 1.0
+        for name, f in type_fractions(neuron_types, area, layer, pop):
+            value += f * neuron_types[name]['neuron_params_' + pop].get(key, base)
+            f_base -= f
+        return value + f_base * base
+
+    def _psc_kernel(self, area, layer, pop, synapse_key, dt):
+        """
+        Charge kernel of the synapses onto one population.
+
+        ``tau_syn_ex`` / ``tau_syn_in`` are parameters of the *receiving*
+        neuron, so the kernel of ``(area, layer, pop)`` mixes the kernels of its
+        neuron types, weighted by their fractions; the base neurons take the
+        remaining fraction. Every kernel is scaled by its time constant (the
+        charge a unit-amplitude PSC delivers), so that the postsynaptic current
+        is ``convolve(weighted_rate, kernel, mode='same')``.
+
+        Parameters
+        ----------
+        area, layer, pop : str
+            Target population.
+        synapse_key : str
+            ``'tau_syn_ex'`` or ``'tau_syn_in'``.
+        dt : float
+            Time step of the signal the kernel is applied to (ms).
+
+        Returns
+        -------
+        kernel : ndarray
+            Centred on t = 0, as ``kernel_for_psc``.
+        """
+        neuron_types = self.net_dict.get('neuron_types') or {}
+        tau_n = self.net_dict['neuron_params_' + pop][synapse_key]
+        mix = []
+        for name, f in type_fractions(neuron_types, area, layer, pop):
+            tau_t = neuron_types[name]['neuron_params_' + pop].get(synapse_key, tau_n)
+            if f > 0.0 and tau_t != tau_n:
+                mix.append((f, tau_t))
+        if not mix:
+            return tau_n * kernel_for_psc(tau_n, dt)
+
+        # Kernels of different tau are only aligned on a common, centred grid.
+        parts = [(1.0 - sum(f for f, _ in mix), tau_n)] + mix
+        t_max = 10 * max(tau for _, tau in parts)
+        t_ker = np.arange(-t_max, t_max, dt)
+        kernel = np.zeros_like(t_ker)
+        for f, tau in parts:
+            k = np.exp(-t_ker / tau) / tau
+            k[t_ker < -dt / 2] = 0  # causal
+            kernel += f * tau * k / k.sum()
+        return kernel
+
+    def _filterInputRates(self, weighted_rates, synapse_key, dt):
+        """
+        Postsynaptic currents from weighted presynaptic rates.
+
+        Parameters
+        ----------
+        weighted_rates : DataFrame
+            Rows are target populations, columns time; each row is
+            ``sum_j J_ij K_ij nu_j`` over the sources of one synapse type.
+        synapse_key : str
+            ``'tau_syn_ex'`` or ``'tau_syn_in'``.
+        dt : float
+            Time step of the columns (ms).
+
+        Returns
+        -------
+        currents : DataFrame
+            Same shape as ``weighted_rates``.
+        """
+        out = np.empty(weighted_rates.shape)
+        for i, (area, layer, pop) in enumerate(weighted_rates.index):
+            kernel = self._psc_kernel(area, layer, pop, synapse_key, dt)
+            out[i] = convolve(weighted_rates.values[i], kernel, mode='same')
+        return pd.DataFrame(out, index=weighted_rates.index,
+                            columns=weighted_rates.columns)
 
     @timeit
     def fullAnalysis(self):
@@ -215,9 +301,9 @@ class Analysis():
         for area in self.popGids.index.levels[0]:
             self.logger.info('Plotting %s', area)
             self.plotRasterArea(area)
-            if self._abeta_active():
-                self.logger.info('Plotting Abeta-affected nodes %s', area)
-                self.plotRasterAbetaArea(area)
+            if self._active_neuron_types():
+                self.logger.info('Plotting neuron types %s', area)
+                self.plotRasterNeuronTypeArea(area)
             self.logger.info('Plotting %s LFP proxy', area)
             self.plotLfpArea(area)
             self.logger.info('Plotting %s LFP PSD', area)
@@ -499,13 +585,6 @@ class Analysis():
             weights = self.net_dict['weights'].loc[index, index]
             synapses = self.net_dict['synapses_internal'].loc[index, index]
             indeg = synapses.div(NN, axis=0)
-            tau_s_ex_E = self.net_dict['neuron_params_E']['tau_syn_ex']
-            tau_s_in_E = self.net_dict['neuron_params_E']['tau_syn_in']
-            tau_s_ex_I = self.net_dict['neuron_params_I']['tau_syn_ex']
-            tau_s_in_I = self.net_dict['neuron_params_I']['tau_syn_in']
-            assert (tau_s_ex_E == tau_s_ex_I) and (tau_s_in_E == tau_s_in_I)
-            tau_syn_ex = tau_s_ex_E
-            tau_syn_in = tau_s_in_E
             dt = self.sim_dict['sim_resolution']
             binsize = self.ana_dict['rate_histogram']['binsize']
             t_start = 0.
@@ -513,30 +592,25 @@ class Analysis():
             if t_stop is None:
                 t_stop = self.sim_dict['t_sim']
 
-            kernel_syn_in = kernel_for_psc(tau_syn_in, dt)
-            kernel_syn_ex = kernel_for_psc(tau_syn_ex, dt)
-
             t_in = np.arange(t_start, t_stop, binsize)
+            rates = pd.DataFrame(dict(inst_rates.items()), index=t_in).T
 
-            # Apply convolution to all firing rates emitted from a particular
-            # population. Depending on whether the population is excitatory or
-            # inhibitory different kernels with different synaptic time
-            # constants are used. The results are the postynaptic currents
-            # originating in a particular population.
-            tmp = {}
-            for (area, layer, population), dat in inst_rates.items():
-                if population == 'E':
-                    tau_s = tau_syn_ex
-                    kernel = kernel_syn_ex
-                else:
-                    tau_s = tau_syn_in
-                    kernel = kernel_syn_in
-                tmp[(area, layer, population)] = convolve(tau_s*dat, kernel,
-                                                          mode='same')
-            pscs = pd.DataFrame(tmp, index=t_in).T
+            # Weighted input rates per target, separately for excitatory and
+            # inhibitory sources, convolved with the kernel of the target's
+            # synapses: tau_syn is a parameter of the receiving neuron, mixed
+            # over its neuron types. The results are the postsynaptic currents.
+            w_abs = weights.abs() * indeg
+            is_E = rates.index.get_level_values(-1) == 'E'
+            curr = (
+                self._filterInputRates(
+                    w_abs.loc[:, rates.index[is_E]].dot(rates.loc[is_E]),
+                    'tau_syn_ex', dt)
+                + self._filterInputRates(
+                    w_abs.loc[:, rates.index[~is_E]].dot(rates.loc[~is_E]),
+                    'tau_syn_in', dt)
+            )
 
-            # Include weights, indegrees and average
-            curr = (weights.abs() * indeg).dot(pscs)
+            # Average over the areas
             curr = curr.mul(NN, axis=0).groupby(level=0).sum()
             curr = curr.div(NN.groupby(level=0).sum(), axis=0)
             curr.to_pickle(os.path.join(
@@ -841,13 +915,18 @@ class Analysis():
             t_start = self.ana_dict['lvr']['t_start']
             t_stop = self.ana_dict['lvr']['t_stop']
             min_spikes = self.ana_dict['lvr']['min_spikes']
-            t_ref_E = self.net_dict['neuron_params_E']['t_ref']
-            t_ref_I = self.net_dict['neuron_params_I']['t_ref']
-            # TODO different refractory periods
-            assert(t_ref_E == t_ref_I)
-            t_ref = t_ref_E
-            lv = self.spikes.apply(LV, args=(t_ref, t_start, t_stop,
-                                             min_spikes))
+            # Every neuron with the refractory period of its neuron type.
+            # Without spike-train GIDs (shell-based reader) a population of
+            # several types falls back to their fraction-weighted mean.
+            gids = self._spikeGids()
+            lv = pd.Series([
+                LV(sts,
+                   self._neuronParam(area, layer, pop, gids.loc[(area, layer, pop)], 't_ref')
+                   if gids is not None else
+                   self._populationParam(area, layer, pop, 't_ref'),
+                   t_start, t_stop, min_spikes)
+                for (area, layer, pop), sts in self.spikes.items()
+            ], index=self.spikes.index, dtype=float)
             lv.to_pickle(os.path.join(self.sim_folder, 'lv.pkl'))
         return lv
 
@@ -1139,37 +1218,9 @@ class Analysis():
                     e, exc_info=True)
             raise
 
-        is_abeta = self._abeta_active()
-
-        def _effective_kernel(pop_type, synapse_key, dt, area, layer):
-            """Weighted exponential kernel; handles Abeta mixed populations.
-
-            The Abeta fraction may be configured per area/layer, so it is
-            resolved for the specific ``(area, layer)`` of the population.
-            """
-            if pop_type == 'E':
-                tau_n     = self.net_dict['neuron_params_E'][synapse_key]
-                ratio_cfg = self.net_dict.get('Abeta_ratio_E', 0.0)
-                tau_a     = self.net_dict.get('neuron_params_Abeta_E', {}).get(synapse_key, tau_n)
-            else:
-                tau_n     = self.net_dict['neuron_params_I'][synapse_key]
-                ratio_cfg = self.net_dict.get('Abeta_ratio_I', 0.0)
-                tau_a     = self.net_dict.get('neuron_params_Abeta_I', {}).get(synapse_key, tau_n)
-            f = resolve_abeta_ratio(ratio_cfg, area, layer) if is_abeta else 0.0
-
-            k_n = kernel_for_psc(tau_n, dt)
-            if f == 0.0 or tau_a == tau_n:
-                return tau_n, k_n
-
-            k_a = kernel_for_psc(tau_a, dt)
-            n   = max(len(k_n), len(k_a))
-            k_n = np.pad(k_n, (0, n - len(k_n)))
-            k_a = np.pad(k_a, (0, n - len(k_a)))
-            return (1 - f) * tau_n + f * tau_a, (1 - f) * k_n + f * k_a
-
-        # --- Build PSC time series per source population ---
+        # --- Population rates per source population ---
         try:
-            pscs = {}
+            src_rates = {}
 
             if fast:
                 sample = next(iter(self.rate_hist))
@@ -1192,9 +1243,7 @@ class Analysis():
                         raise ValueError(
                             'rate_hist length inconsistency at %s/%s/%s: '
                             'got %d bins, expected %d' % (area, layer, pop, len(dat), n_bins))
-                    synapse_key     = 'tau_syn_ex' if pop == 'E' else 'tau_syn_in'
-                    tau_eff, kernel = _effective_kernel(pop, synapse_key, dt_lfp, area, layer)
-                    pscs[(area, layer, pop)] = convolve(tau_eff * dat, kernel, mode='same')
+                    src_rates[(area, layer, pop)] = np.asarray(dat, dtype=float)
 
             else:
                 n_bins  = int(round(t_sim / sim_dt))
@@ -1228,34 +1277,27 @@ class Analysis():
 
                     spike_train, _ = np.histogram(flat_spikes, bins=t_edges)
                     # Convert counts to firing rate in Hz
-                    rate = spike_train.astype(float) / (n_neurons * sim_dt * 1e-3)
-
-                    synapse_key     = 'tau_syn_ex' if pop == 'E' else 'tau_syn_in'
-                    tau_eff, kernel = _effective_kernel(pop, synapse_key, sim_dt, area, layer)
-                    pscs[(area, layer, pop)] = convolve(tau_eff * rate, kernel, mode='same')
+                    src_rates[(area, layer, pop)] = (
+                        spike_train.astype(float) / (n_neurons * sim_dt * 1e-3))
 
         except (KeyError, ValueError, TypeError) as e:
             if self.logger:
                 self.logger.error(
-                    'calc_lfp_proxy_kernel: PSC computation failed: %s', e, exc_info=True)
+                    'calc_lfp_proxy_kernel: rate computation failed: %s', e, exc_info=True)
             raise
 
-        # Validate uniform PSC length across all populations
-        psc_lengths = set(len(v) for v in pscs.values())
-        if len(psc_lengths) > 1:
-            msg = ('calc_lfp_proxy_kernel: inconsistent PSC array lengths across '
-                   'populations: %s' % {k: len(v) for k, v in pscs.items()})
-            if self.logger:
-                self.logger.error(msg)
-            raise ValueError(msg)
-
-        pscs_df = pd.DataFrame(pscs, index=t).T   # (n_pops, n_timesteps)
+        rates_df = pd.DataFrame(src_rates, index=t).T   # (n_pops, n_timesteps)
 
         # --- E/I current separation ---
+        # Weighted input rates per target, then one convolution per target with
+        # the kernel of the target's synapses (tau_syn belongs to the receiving
+        # neuron, and is mixed over its neuron types).
         try:
             w_signed = weights * indeg
-            I_ex = w_signed.clip(lower=0).dot(pscs_df)   # positive (E sources)
-            I_in = w_signed.clip(upper=0).dot(pscs_df)   # negative (I sources)
+            I_ex = self._filterInputRates(
+                w_signed.clip(lower=0).dot(rates_df), 'tau_syn_ex', dt_lfp)  # positive (E sources)
+            I_in = self._filterInputRates(
+                w_signed.clip(upper=0).dot(rates_df), 'tau_syn_in', dt_lfp)  # negative (I sources)
         except Exception as e:
             if self.logger:
                 self.logger.error(
@@ -3612,6 +3654,26 @@ class Analysis():
         plt.clf()
         plt.close(fig)
 
+    @staticmethod
+    def _rasterLegend(ax, entries, fontsize=10):
+        """
+        Legend of a raster plot in the lower right corner.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+        entries : list of (str, color)
+            Label and dot colour of every kind of neuron in the plot.
+        fontsize : float
+        """
+        handles = [
+            plt.Line2D([], [], color=color, marker='.', markersize=8,
+                       linestyle='None', label=label)
+            for label, color in entries
+        ]
+        ax.legend(handles=handles, loc='lower right', fontsize=fontsize,
+                  framealpha=0.9)
+
     def plotRasterArea(self, area):
         """
         Generates a rasterplot of the spiking activity in a specified area.
@@ -3637,7 +3699,9 @@ class Analysis():
             name = ' '.join([layer, pop])
             names.append(name)
 
-            # Random shuffle spiketrains in place
+            # Random shuffle spiketrains (a copy: self.spikes stays aligned
+            # with self.spike_gids)
+            sts = list(sts)
             random.shuffle(sts)
             j = 0
             # Real population size, not all neurons spiked. Thus take the
@@ -3686,24 +3750,36 @@ class Analysis():
         plt.clf()
         plt.close(fig)
 
-    def plotRasterAbetaArea(self, area):
+    def plotRasterNeuronTypeArea(self, area):
         """
-        Generates a rasterplot of the spiking activity in a specified area.
-        Parameters low and high are in ms.
+        Generates a rasterplot of the spiking activity in a specified area,
+        coloured by neuron type. Parameters low and high are in ms.
+
+        A random sample of ``fraction`` of the neurons of every population,
+        silent ones included, is drawn and shown in GID order. The neuron
+        types occupy contiguous GID ranges, so every type forms a band of its
+        own, and each row is coloured by the type of its actual neuron.
         ----------
         area : string
         """
-        if not self._abeta_active():
+        if not self._active_neuron_types():
             if self.logger:
                 self.logger.info(
-                    'No Abeta neurons (Abeta disabled or all ratios zero); '
-                    'skipping Abeta raster for %s.', area)
+                    'No custom neuron types (none configured or all ratios '
+                    'zero); skipping neuron type raster for %s.', area)
+            return
+        gids_all = self._spikeGids()
+        if gids_all is None:
+            if self.logger:
+                self.logger.warning(
+                    'Spike trains carry no GIDs (python_sort=False); skipping '
+                    'neuron type raster for %s.', area)
             return
         if not hasattr(self, 'popGids'):
             self.popGids = self._readPopGids()
-        if not hasattr(self, "AbetaGids"):
-            self.AbetaGids = self._readAbetaPopGids()
-        
+        if not hasattr(self, 'typeGids'):
+            self.typeGids = self._readNeuronTypeGids()
+
         extension = self.ana_dict['extension']
         fraction = self.ana_dict['plotRasterArea']['fraction']
         low = self.ana_dict['plotRasterArea']['low']
@@ -3714,84 +3790,71 @@ class Analysis():
         names = []
         gid_norm = 0
         ms_to_s = 0.001
-        colors = {'Abeta_E': '#1f77b4', 'Abeta_I': '#ff7f0e', "E": "#a8dbff", "I": "#ffd6b3"}
+        # Base neurons in light E / I colours, every custom type in a colour
+        # of its own (fixed by its position in neuron_types).
+        base_colors = {'E': '#a8dbff', 'I': '#ffd6b3'}
+        type_palette = ['#2ca02c', '#d62728', '#9467bd', '#8c564b',
+                        '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        type_colors = {
+            name: type_palette[i % len(type_palette)]
+            for i, name in enumerate(self.net_dict['neuron_types'])
+        }
+        present_types = set()   # in the legend even if they stay silent
 
         for (layer, pop), sts in self.spikes.loc[area].items():
-            # y label axis naming
-            name = ' '.join([layer, pop])
-            names.append(name)
-
-            # Random shuffle spiketrains in place  
-            random.shuffle(sts)
-            j = 0
-            
-            # Real population size, not all neurons spiked. Thus take the
-            # fraction from this value.
-            pop_size = self.popGids.loc[area, layer, pop].maxGID - \
-                    self.popGids.loc[area, layer, pop].minGID + 1
-            
-            # 获取当前群体的GID范围
-            min_gid = self.popGids.loc[area, layer, pop].minGID
-            max_gid = self.popGids.loc[area, layer, pop].maxGID
-            
-            # 检查当前群体是否有对应的Abeta神经元
-            has_abeta = False
-            abeta_min_gid = None
-            abeta_max_gid = None
-            try:
-                abeta_info = self.AbetaGids.loc[area, layer, pop]
-                abeta_min_gid = abeta_info.minGID
-                abeta_max_gid = abeta_info.maxGID
-                has_abeta = True
-            except KeyError:
-                # 当前群体没有Abeta神经元
-                has_abeta = False
-            
-            # Fraction of total number of neurons
+            names.append(' '.join([layer, pop]))
+            pop_gids = self.popGids.loc[area, layer, pop]
+            min_gid, max_gid = int(pop_gids.minGID), int(pop_gids.maxGID)
+            pop_size = max_gid - min_gid + 1
             no_sts = int(fraction * pop_size)
-            # Fraction of neurons that actually spiked
-            frac_spiking = len(sts) * 1. / pop_size
+
+            # Spike train of every neuron that spiked, by GID
+            train_of = dict(zip(gids_all.loc[(area, layer, pop)], sts))
+            # GID ranges of the neuron types within this population
+            try:
+                type_ranges = [
+                    (row.minGID, row.maxGID, neuron_type)
+                    for neuron_type, row in
+                    self.typeGids.loc[(area, layer, pop)].iterrows()
+                ]
+            except KeyError:
+                type_ranges = []
 
             # where to put y label
             ind.append(- int(no_sts / 2) + gid_norm)
-            
-            # Loop as many times as we have spike trains
-            for i in range(no_sts):
-                gid_norm = gid_norm - 1
-                # Decide whether spiketrain contains spikes
-                if random.random() < frac_spiking and j < len(sts):
-                    st = sts[j]
-                    j += 1
-                    filtered_st = st[st > low]
-                    filtered_st = filtered_st[filtered_st < high]
-                    
-                    if len(filtered_st) > 0:
-                        # 计算当前神经元的近似GID
-                        # 基于在显示序列中的位置推算实际GID
-                        neuron_gid = min_gid + int((i / no_sts) * pop_size)
-                        
-                        # 检查当前神经元是否为Abeta神经元
-                        is_abeta = (has_abeta and 
-                                abeta_min_gid <= neuron_gid <= abeta_max_gid)
-                        
-                        # 根据是否为Abeta神经元选择颜色
-                        if is_abeta:
-                            if pop == 'E':
-                                color = colors['Abeta_E']
-                            else:  # pop == 'I'
-                                color = colors['Abeta_I']
-                        else:
-                            color = colors[pop]
-                        
-                        ax1.plot(
-                            filtered_st * ms_to_s,
-                            gid_norm * np.ones_like(filtered_st),
-                            color,
-                            marker='.',
-                            markersize=2,
-                            linestyle="None"
-                        )
 
+            sample = sorted(random.sample(range(min_gid, max_gid + 1), no_sts))
+            for gid in sample:
+                gid_norm = gid_norm - 1
+                neuron_type = next(
+                    (t for lo, hi, t in type_ranges if lo <= gid <= hi),
+                    BASE_TYPE)
+                present_types.add(neuron_type if neuron_type != BASE_TYPE
+                                  else (BASE_TYPE, pop))
+                st = train_of.get(gid)
+                if st is None:
+                    continue
+                st = st[(st > low) & (st < high)]
+                if len(st) == 0:
+                    continue
+                if neuron_type == BASE_TYPE:
+                    color = base_colors[pop]
+                else:
+                    color = type_colors[neuron_type]
+                ax1.plot(
+                    st * ms_to_s,
+                    gid_norm * np.ones_like(st),
+                    color,
+                    marker='.',
+                    markersize=2,
+                    linestyle="None"
+                )
+
+        entries = [('{} (base)'.format(p), base_colors[p]) for p in ('E', 'I')
+                   if (BASE_TYPE, p) in present_types]
+        entries += [(t, type_colors[t]) for t in self.net_dict['neuron_types']
+                    if t in present_types]
+        self._rasterLegend(ax1, entries)
         ax1.axis([low * ms_to_s, high * ms_to_s, gid_norm, 0])
         ax1.set_xlabel('Time (s)', fontdict={"size": 12})
         ax1.tick_params(axis="x", labelsize=12)
@@ -3800,7 +3863,7 @@ class Analysis():
         ax1.set_title(area, fontdict={"size": 16})
         fig.savefig(os.path.join(
             self._category_plot_folder('raster'),
-            'raster_Abeta_{0}.{1}'.format(area, extension)
+            'raster_neuron_types_{0}.{1}'.format(area, extension)
         ), dpi=self.ana_dict['dpi'])
         plt.clf()
         plt.close(fig)
@@ -3882,7 +3945,8 @@ class Analysis():
             gid_norm = 0
             for (layer, pop), sts in self.spikes.loc[area].items():
                 layer_roman = roman_to_arabic_numerals[layer]
-                # Random shuffle spiketrains in place
+                # Random shuffle spiketrains (a copy, see plotRasterArea)
+                sts = list(sts)
                 random.shuffle(sts)
 
                 # Real population size, not all neurons spiked. Thus take the fraction from this value.
@@ -4306,6 +4370,61 @@ class Analysis():
             spikes.to_pickle(os.path.join(self.sim_folder, 'spikes.pkl'))
         return spikes
 
+    def _spikeGids(self):
+        """
+        GID of every spike train in ``self.spikes``, same index and order.
+
+        Written by the python_sort reader next to ``spikes.pkl``. Returns None
+        when it is not available (the shell-based reader does not keep GIDs);
+        callers then fall back to population-level approximations.
+        """
+        if getattr(self, 'spike_gids', None) is None:
+            try:
+                self.spike_gids = pd.read_pickle(
+                    os.path.join(self.sim_folder, 'spike_gids.pkl'))
+            except FileNotFoundError:
+                if not self.ana_dict['python_sort']:
+                    return None
+                # spikes.pkl cached by an older version: read them again
+                self._readSpikesFromDAT()
+        return self.spike_gids
+
+    def _neuronParam(self, area, layer, pop, gids, key):
+        """
+        Neuron parameter of individual neurons, from their neuron type.
+
+        Parameters
+        ----------
+        area, layer, pop : str
+            Population of the neurons.
+        gids : array of int
+            GIDs of the neurons.
+        key : str
+            Neuron parameter, e.g. ``'t_ref'``.
+
+        Returns
+        -------
+        values : ndarray
+            One value per GID.
+        """
+        values = np.full(len(gids), float(self.net_dict['neuron_params_' + pop][key]))
+        neuron_types = self.net_dict.get('neuron_types') or {}
+        if not neuron_types or len(gids) == 0:
+            return values
+        if not hasattr(self, 'typeGids'):
+            self.typeGids = self._readNeuronTypeGids()
+        try:
+            rows = self.typeGids.loc[(area, layer, pop)]
+        except KeyError:
+            return values
+        gids = np.asarray(gids)
+        for neuron_type, row in rows.iterrows():
+            if neuron_type in neuron_types:
+                prm = neuron_types[neuron_type]['neuron_params_' + pop]
+                if key in prm:
+                    values[(gids >= row.minGID) & (gids <= row.maxGID)] = prm[key]
+        return values
+
     @timeit
     def _readPopGids(self):
         """
@@ -4337,37 +4456,36 @@ class Analysis():
         return popGids
 
     @timeit
-    def _readAbetaPopGids(self):
+    def _readNeuronTypeGids(self):
         """
-        Reads the min / max GID for each Abeta-affected population.
+        Reads the min / max GID of every neuron type in each population.
 
         Returns
         -------
-        popGids : DataFrame
-            Columns ['minGID', 'maxGID']
+        typeGids : DataFrame
+            Index ['area', 'layer', 'pop', 'type'],
+            columns ['minGID', 'maxGID', 'pop_size']
         """
         try:
-            popGids = pd.read_pickle(
-                os.path.join(self.sim_folder, 'Abeta_GID.pkl')
+            typeGids = pd.read_pickle(
+                os.path.join(self.sim_folder, 'neuron_type_GIDs.pkl')
             )
         except FileNotFoundError:
-            try:
-                popGids = pd.read_csv(
-                    os.path.join(self.sim_folder, 'Abeta_GIDs.dat'),
-                    sep=';', header=None, names=['minGID', 'maxGID', "pop_size"]
-                )
-                popGids.index = pd.MultiIndex.from_tuples([
-                    literal_eval(s) for s in popGids.index
-                ])
-                popGids.index.names = ['area', 'layer', 'pop']
-                # Save popGids to pickle for faster read access
-                popGids.to_pickle(
-                    os.path.join(self.sim_folder, 'Abeta_GIDs.pkl')
-                )
-            except FileNotFoundError:
-                a = np.random.default_rng(43)
-                b = np.random.default_rng(a.choice(10000, 1))
-        return popGids
+            typeGids = pd.read_csv(
+                os.path.join(self.sim_folder, 'neuron_type_GIDs.dat'),
+                sep=';', header=None,
+                names=['pop', 'type', 'minGID', 'maxGID', 'pop_size']
+            )
+            typeGids.index = pd.MultiIndex.from_tuples([
+                literal_eval(p) + (t,)
+                for p, t in zip(typeGids['pop'], typeGids['type'])
+            ], names=['area', 'layer', 'pop', 'type'])
+            typeGids = typeGids.drop(columns=['pop', 'type']).sort_index()
+            # Save typeGids to pickle for faster read access
+            typeGids.to_pickle(
+                os.path.join(self.sim_folder, 'neuron_type_GIDs.pkl')
+            )
+        return typeGids
 
     @timeit
     def _readIsyn(self):
@@ -4445,13 +4563,18 @@ class Analysis():
                 except IndexError:
                     no_spiking.append([area, layer, pop])
                     pass
-            spikes = spikes.groupby(
-                    ['area', 'layer', 'pop']
-                    ).apply(lambda group: group.t.values)
+            grouped = spikes.groupby(['area', 'layer', 'pop'])
+            # GID of every spike train, in the same order as the trains
+            gids = grouped.apply(lambda group: group.gid.values.astype(np.int64))
+            spikes = grouped.apply(lambda group: group.t.values)
 
             for (area, layer, pop) in no_spiking:
                 spikes.loc[area, layer, pop] = np.array([])
+                gids.loc[area, layer, pop] = np.array([], dtype=np.int64)
             spikes = spikes.sort_index()
+            self.spike_gids = gids.sort_index()
+            self.spike_gids.to_pickle(
+                os.path.join(self.sim_folder, 'spike_gids.pkl'))
             return spikes
         else:
             # This routine should be used when the simulated time is long, eg
@@ -5139,6 +5262,8 @@ def LV(sts, t_ref, t_start=None, t_stop=None, LV_min_spikes=3, take_mean=True):
     ----------
     sts : list
         list of spiketrains
+    t_ref : float or array
+        Refractory period (ms), one value or one per spike train
     t_start : float
         First timestep to take into account
     t_stop :
@@ -5149,16 +5274,17 @@ def LV(sts, t_ref, t_start=None, t_stop=None, LV_min_spikes=3, take_mean=True):
     lv : float
         sum of single lvs, needs to normalized (=divided by neuron numbers)
     """
+    # t_ref: one value for all spike trains, or one per spike train
+    t_ref = np.broadcast_to(np.asarray(t_ref, dtype=float), (len(sts),))
     # ensure that there are only spiketrains of len > 2.
     # So every spiketrain st in sts has len(st) > 1.
     if t_start:
         sts = [st[st >= t_start] for st in sts]
     if t_stop:
         sts = [st[st <= t_stop] for st in sts]
-    sts = [st for st in sts if len(st) >= LV_min_spikes]
-    if len(sts) > 0:
-        isi = [np.diff(x, 1) for x in sts]
-        lvr = [calculate_lv(x, t_ref) for x in isi]
+    keep = [i for i, st in enumerate(sts) if len(st) >= LV_min_spikes]
+    if len(keep) > 0:
+        lvr = [calculate_lv(np.diff(sts[i], 1), t_ref[i]) for i in keep]
         if take_mean:
             return np.mean(lvr)
         else:

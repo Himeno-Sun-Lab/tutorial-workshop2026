@@ -20,6 +20,11 @@ This script searches for the ``eta_ext`` that (a) wakes the network up and
 (``src/roi_parameter_search.py``): area-averaged excitatory rates 3-5 Hz,
 inhibitory rates 5-15 Hz.
 
+It calibrates the healthy network only: no neuron types (``neuron_types``)
+can be added.  A pathological experiment keeps the drive of its healthy
+control; recalibrating it would pull it back to the healthy working point and
+remove the very effect under study.
+
 Three evaluation methods, cheapest first
 ----------------------------------------
 ``analytic``  Closed-form mean drive.  For an iaf_psc_exp neuron the stationary
@@ -72,10 +77,9 @@ Examples
     # 8 GB laptop, noisier but quicker
     python tools/eta_ext_search.py --n-scaling 0.002 --t-sim 1500
 
-    # calibrate for one individual: their connectome and their amyloid map
+    # calibrate for one individual: their connectome
     python tools/eta_ext_search.py \
-        --con-path   ../model/experimental_data/ADNI/AD_SC.mat \
-        --abeta-ratio ../model/experimental_data/ADNI/AD_abeta_ratio.csv
+        --con-path ../model/experimental_data/ADNI/AD_SC.mat
 
     # average three seeds per candidate (slower, much less noisy)
     python tools/eta_ext_search.py --seeds 2903 1234 5678
@@ -161,17 +165,6 @@ def bootstrap(root):
 
 
 # --------------------------------------------------------------------------- #
-#  Amyloid neuron parameters (only used when --abeta-ratio is given)
-# --------------------------------------------------------------------------- #
-ABETA_E = dict(E_L=-65.0, V_th=-50.0, V_reset=-70.0, C_m=220.0,
-               tau_m=10.0, tau_syn_ex=2.0, tau_syn_in=2.0, t_ref=2.0)
-ABETA_I = dict(E_L=-70.0, V_th=-45.0, V_reset=-70.0, C_m=100.0,
-               tau_m=10.0, tau_syn_ex=2.0, tau_syn_in=2.0, t_ref=2.0)
-NO_SPREAD = {p: {"distribution": "lognormal", "rel_sd": 0.0}
-             for p in ("V_th", "C_m", "tau_m")}
-
-
-# --------------------------------------------------------------------------- #
 #  Network construction
 # --------------------------------------------------------------------------- #
 class NetworkFactory:
@@ -205,23 +198,11 @@ class NetworkFactory:
             "scaling_factors_recurrent": {"cc_scalingEtoE": args.cc_e_to_e,
                                           "cc_scalingEtoI": args.cc_e_to_i},
             "input_params": {"eta_ext": float(eta)},
-            "Abeta": args.abeta_ratio is not None,
         }
         if args.con_path is not None:
             # An individual connectome replaces the group-average one; the file
             # must have the same variable layout (C_L, C_R, Dist, DK_Names).
             o["predictive_connectomic_params"] = {"con_path": str(args.con_path)}
-        if args.abeta_ratio is not None:
-            o.update({
-                "Abeta_ratio_E": args.abeta_ratio,
-                "Abeta_ratio_I": 0.0,
-                "neuron_model_Abeta_E": "iaf_psc_exp",
-                "neuron_model_Abeta_I": "iaf_psc_exp",
-                "neuron_params_Abeta_E": ABETA_E,
-                "neuron_params_Abeta_I": ABETA_I,
-                "neuron_param_dist_Abeta_E": NO_SPREAD,
-                "neuron_param_dist_Abeta_I": NO_SPREAD,
-            })
         return o
 
     def build(self, eta):
@@ -524,15 +505,6 @@ def parse_pop(text):
     return tuple(parts)
 
 
-def parse_abeta(text):
-    if text is None:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return text            # a CSV path, resolved by helpers/abeta.py
-
-
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Search for the eta_ext that keeps a downscaled network "
@@ -547,9 +519,6 @@ def parse_args(argv=None):
     g.add_argument("--scaling-type", choices=["sqrt", "linear"], default="sqrt")
     g.add_argument("--cc-e-to-e", type=float, default=2.5)
     g.add_argument("--cc-e-to-i", type=float, default=5.0)
-    g.add_argument("--abeta-ratio", type=parse_abeta, default=None,
-                   help="fraction of amyloid-affected E neurons, or a path to "
-                        "an amyloid CSV; omit for a healthy network")
     g.add_argument("--con-path", type=Path, default=None,
                    help="structural connectivity .mat to use instead of the "
                         "group-average one, e.g. an individual's tractography")
@@ -616,8 +585,6 @@ def parse_args(argv=None):
     # the invocation directory has to be resolved before that happens.
     if args.con_path is not None:
         args.con_path = Path(args.con_path).resolve()
-    if isinstance(args.abeta_ratio, str):
-        args.abeta_ratio = str(Path(args.abeta_ratio).resolve())
     if args.model_root is not None:
         args.model_root = Path(args.model_root).resolve()
     if args.fullscale_rates is not None:

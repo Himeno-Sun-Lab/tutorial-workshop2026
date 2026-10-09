@@ -150,6 +150,19 @@ params['neuron_param_dist_I'] = {
     'C_m': {'distribution': 'lognormal', 'rel_sd': 0.},   # 0.34
     'tau_m': {'distribution': 'lognormal', 'rel_sd': 0.}, # 0.43
 }
+# Additional neuron types, {name: type_dict}. Each type replaces a fraction of
+# the neurons of every population; the remaining ('base') neurons use the
+# parameters above. Per type and X in {E, I} the optional keys are:
+#   'ratio_X'             fraction of X neurons: scalar, {area: f},
+#                         {area: {layer: f}} or a CSV path (default 0)
+#   'neuron_model_X'      NEST model (default neuron_model_X)
+#   'neuron_params_X'     overrides of neuron_params_X
+#   'neuron_param_dist_X' overrides of neuron_param_dist_X
+# See helpers/neuron_types.py. Example:
+# params['neuron_types'] = {
+#     'Abeta': {'ratio_E': 0.1, 'neuron_params_E': {'E_L': -65.0, 'V_th': -50.0}},
+# }
+params['neuron_types'] = {}
 
 """
 Connection parameters

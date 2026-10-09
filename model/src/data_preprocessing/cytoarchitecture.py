@@ -71,10 +71,6 @@ class NeuronNumbers():
         self.layer_list_plus1 = ['I'] + self.layer_list
         fraction_E_neurons = ratio_exc_to_inh(ei_ratio_path)
         self.setPopulationDefault(fraction_E_neurons=fraction_E_neurons)
-        # if not Abeta:
-        #     self.setPopulationDefault(fraction_E_neurons=fraction_E_neurons)
-        # else:
-        #     self.setPopulationDefaultAbeta(fraction_E_neurons=fraction_E_neurons, Abeta_ratio_E=Abeta_ratio_E, Abeta_ratio_I=Abeta_ratio_I)
         if source == 'VonEconomoKoskinas':
             # Load VEK data
             vek = VonEconomoKoskinas(src_path)
@@ -281,22 +277,6 @@ class NeuronNumbers():
             self.frac_pop.loc[layer, 'E'] = fraction_E_neurons.loc[layer]
             self.frac_pop.loc[layer, 'I'] = 1. - fraction_E_neurons.loc[layer]
     
-    def setPopulationDefaultAbeta(self, fraction_E_neurons, Abeta_ratio_E, Abeta_ratio_I):
-        self.population_list = ["E", "I", "Abeta_E", "Abeta_I"]
-        self.frac_pop = pd.Series(
-            data=0,
-            index=pd.MultiIndex.from_product(
-                [self.layer_list, self.population_list],
-                names=["layer", "population"]
-            ),
-            dtype=np.float64
-        )
-        for layer in self.layer_list:
-            self.frac_pop.loc[layer, "E"] = fraction_E_neurons.loc[layer] * (1. - Abeta_ratio_E)
-            self.frac_pop.loc[layer, "Abeta_E"] = fraction_E_neurons.loc[layer] * Abeta_ratio_E
-            self.frac_pop.loc[layer, "I"] = (1. - fraction_E_neurons) * (1. - Abeta_ratio_I)
-            self.frac_pop.loc[layer, "Abeta_I"] = (1. - fraction_E_neurons) * Abeta_ratio_I
-        pass
     def getThickness(self):
         """
         Returns the layer thickness in the layers for all areas.
