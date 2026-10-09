@@ -514,11 +514,14 @@ class Network():
     def scaleNetwork(self):
         """
         Scales the network by scaling neuron numbers, synaptic weights and
-        indegrees. The scaling factors are given by the parameters
-        N_scaling and K_scaling. The scaling is done in the following order:
-        1. Scale neuron numbers
-        2. Add extra DC drive based on scaled network
-        3. Scale synaptic weights and indegrees
+        indegrees (van Albada et al. 2015). The scaling factors are given by
+        the parameters N_scaling and K_scaling. The scaling is done in the
+        following order:
+        1. Compute the mean synaptic input current of the full-scale network
+        2. Scale neuron numbers
+        3. Scale indegrees by K_scaling and synaptic weights by
+           1/sqrt(K_scaling) ('sqrt') or 1/K_scaling ('linear')
+        4. Add extra DC drive that restores the full-scale mean input
 
         Raises
         ------
@@ -532,11 +535,6 @@ class Network():
                 self.logger.error(msg)
             raise ValueError(msg)
 
-        # Scale neuron numbers
-        self.net['neuron_numbers'] = np.round(
-            self.net['neuron_numbers'] * self.params['N_scaling']
-        ).astype(int)
-
         # Determine the scaling factor type
         if self.net['scaling_type'] == 'sqrt':
             scaling_factor = np.sqrt(self.params['K_scaling'])
@@ -547,6 +545,14 @@ class Network():
             if self.logger:
                 self.logger.error(msg)
             raise ValueError(msg)
+
+        # Mean input of the full-scale network, before anything is scaled
+        mean_input_full = self._meanSynapticInput()
+
+        # Scale neuron numbers
+        self.net['neuron_numbers'] = np.round(
+            self.net['neuron_numbers'] * self.params['N_scaling']
+        ).astype(int)
 
         # Scale synaptic weights and indegrees
         self.net['synapses_internal'] = np.round(
@@ -564,37 +570,52 @@ class Network():
         self.net['weights_ext_sd'] /= scaling_factor
 
         # Add extra DC drive based on scaled network
-        self.extraDCforScaledNetwork()
+        self.extraDCforScaledNetwork(mean_input_full)
 
-    def extraDCforScaledNetwork(self):
+    def extraDCforScaledNetwork(self, mean_input_full):
         """
-        Add extra DC drive to the network to compensate for scaling and 
-        preserve the mean and variance of the input.
+        Add extra DC drive that compensates the mean input lost by scaling.
 
-        This method adjusts the external synaptic weights and calculates 
-        the additional direct current (DC) input required to maintain 
-        network stability after scaling. The adjustments are based on 
-        neuron parameters and synaptic properties.
+        Scaling indegrees by k and weights by 1/sqrt(k) preserves the variance
+        of the synaptic input but multiplies its mean by sqrt(k)
+        (van Albada et al. 2015). The missing part is supplied as DC current:
 
-        Steps:
-        1. Calculate the conversion factors from postsynaptic potential (PSP) 
-           to postsynaptic current (PSC) for excitatory and inhibitory neurons.
-        2. Adjust the external synaptic weights using the calculated conversion factors.
-        3. Create a MultiIndex for neuron parameters based on area, layer, and population.
-        4. Initialize tau_m (membrane time constant) and C_m (membrane capacitance) 
-           Series with zeros.
-        5. Assign tau_m and C_m values for excitatory and inhibitory neurons.
-        6. Calculate the x1 term, which represents the external input scaled by 
-           synaptic weights, neuron parameters, and external rate.
-        7. Calculate the additional DC drive required to compensate for the scaling 
-           factor (K_scaling) and update the network's dc_drive attribute.
+            I_DC = mu_full - mu_scaled
+                 = (1 - sqrt(k)) * mu_full   for 'sqrt'
+                 = 0                         for 'linear'
 
-        Attributes:
-        - self.net: Dictionary containing network parameters and properties.
-        - self.params: Dictionary containing scaling parameters.
+        Both means are evaluated with the same full-scale rates, mu_scaled
+        with the indegrees as actually realized after rounding, so the DC
+        current also absorbs the rounding of small synapse numbers.
 
-        Returns:
-        None
+        Parameters
+        ----------
+        mean_input_full : Series
+            Mean synaptic input current (pA) of the full-scale network, as
+            returned by _meanSynapticInput() before scaling.
+        """
+        mean_input_scaled = self._meanSynapticInput()
+        extra_dc = (mean_input_full - mean_input_scaled).reindex(
+            self.net['dc_drive'].index).fillna(0.)
+        # populations emptied by N_scaling receive no current
+        extra_dc[self.net['neuron_numbers'] < 1] = 0.
+        self.net['dc_drive'] = self.net['dc_drive'] + extra_dc
+
+    def _meanSynapticInput(self):
+        """
+        Stationary mean synaptic input current (pA) of every non-empty
+        population, recurrent plus external Poisson input, with the recurrent
+        sources firing at the full-scale rates. For exponential current-based
+        synapses a spike of amplitude J delivers the charge J * tau_syn, so
+
+            I = 1e-3 * sum_j p_transmit * J_ij * tau_syn_ij * K_ij * nu_j
+              + 1e-3 * J_ext_i * tau_syn_ex_i * K_ext_i * nu_ext_i
+
+        with J in pA, tau_syn in ms and rates in 1/s.
+
+        Returns
+        -------
+        mean_input : Series
         """
         # Collect network parameters, make sure everything is sorted the same way
         N = self.net['neuron_numbers'].sort_index()
@@ -615,96 +636,39 @@ class Network():
         J = J.loc[mask, mask]
         J_ext = J_ext.loc[mask]
 
-        # Conversion factor PSP -> PSC
-        tau_m_E = self.net['neuron_params_E']['tau_m']
-        C_m_E = self.net['neuron_params_E']['C_m']
-        tau_syn_ex_E = self.net['neuron_params_E']['tau_syn_ex']
-        neuron_model_E = self.net['neuron_model_E']
-        PSP_ee_over_PSC_ee = self._getPspOverPsc(
-            C_m_E, tau_m_E, tau_syn_ex_E, neuron_model_E
-        )
-        PSP_ei_over_PSC_ei = self._getPspOverPsc(
-            C_m_E, tau_m_E, tau_syn_ex_E, neuron_model_E
-        )
+        # Synaptic time constants: rows are targets, columns sources
+        ix_E = (slice(None), slice(None), 'E')
+        ix_I = (slice(None), slice(None), 'I')
+        prm_E = self.net['neuron_params_E']
+        prm_I = self.net['neuron_params_I']
+        tau_syn = pd.DataFrame(data=0., index=N.index, columns=N.index)
+        tau_syn.loc[ix_E, ix_E] = prm_E['tau_syn_ex']
+        tau_syn.loc[ix_E, ix_I] = prm_E['tau_syn_in']
+        tau_syn.loc[ix_I, ix_E] = prm_I['tau_syn_ex']
+        tau_syn.loc[ix_I, ix_I] = prm_I['tau_syn_in']
+        tau_syn_ext = pd.Series(data=0., index=N.index)
+        tau_syn_ext.loc[ix_E] = prm_E['tau_syn_ex']
+        tau_syn_ext.loc[ix_I] = prm_I['tau_syn_ex']
 
-        tau_m_I = self.net['neuron_params_I']['tau_m']
-        C_m_I = self.net['neuron_params_I']['C_m']
-        tau_syn_ex_I = self.net['neuron_params_I']['tau_syn_ex']
-        neuron_model_I = self.net['neuron_model_I']
-        PSP_ie_over_PSC_ie = self._getPspOverPsc(
-            C_m_I, tau_m_I, tau_syn_ex_I, neuron_model_I
-        )
-        PSP_ii_over_PSC_ii = self._getPspOverPsc(
-            C_m_I, tau_m_I, tau_syn_ex_I, neuron_model_I
-        )
-
-        # Calculate external PSP
-        J_ext.loc[
-            (slice(None), slice(None), 'E')
-        ] *= PSP_ee_over_PSC_ee
-        J_ext.loc[
-            (slice(None), slice(None), 'I')
-        ] *= PSP_ie_over_PSC_ie
-
-        # Calculate PSP of internal synapses
-        J.loc[
-            (slice(None), slice(None), 'E'),
-            (slice(None), slice(None), 'E')
-        ] *= PSP_ee_over_PSC_ee
-        J.loc[
-            (slice(None), slice(None), 'I'),
-            (slice(None), slice(None), 'E')
-        ] *= PSP_ie_over_PSC_ie
-        J.loc[
-            (slice(None), slice(None), 'E'),
-            (slice(None), slice(None), 'I')
-        ] *= PSP_ei_over_PSC_ei
-        J.loc[
-            (slice(None), slice(None), 'I'),
-            (slice(None), slice(None), 'I')
-        ] *= PSP_ii_over_PSC_ii
-
-        # Initialize tau_m and C_m Series with zeros
-        tau_m = pd.Series(data=0., index=N.index)
-        C_m = pd.Series(data=0., index=N.index)
-
-        # Assign tau_m and C_m values for excitatory and inhibitory neurons
-        tau_m.loc[
-            (slice(None), slice(None), 'E')
-        ] = tau_m_E
-        tau_m.loc[
-            (slice(None), slice(None), 'I')
-        ] = tau_m_I
-
-        C_m.loc[
-            (slice(None), slice(None), 'E')
-        ] = C_m_E
-        C_m.loc[
-            (slice(None), slice(None), 'I')
-        ] = C_m_I
-
-        # Calculate x1 and x1_ext terms
-
-        # Add contribution from external population into the DC drive
-        x1_ext = 1e-3 * tau_m * J_ext * K_ext * nu_ext
-
-        # Add contribution from other populations into the DC drive
+        # Full-scale rates of the recurrent sources
         full_mean_rates = pd.read_pickle(self.net['fullscale_rates'])
-        x1 = 1e-3 * tau_m * (J * K) @ full_mean_rates
-
-        # Determine the scaling factor type
-        if self.net['scaling_type'] == 'sqrt':
-            scaling_factor = np.sqrt(self.params['K_scaling'])
-        elif self.net['scaling_type'] == 'linear':
-            scaling_factor = self.params['K_scaling']
-        else:
-            msg = 'Unknown scaling type: {}'.format(self.net.get('scaling_type'))
+        full_mean_rates = full_mean_rates.reindex(N.index)
+        if full_mean_rates.isna().any():
+            msg = 'fullscale_rates {} lacks rates for populations: {}'.format(
+                self.net['fullscale_rates'],
+                list(full_mean_rates.index[full_mean_rates.isna()]))
             if self.logger:
                 self.logger.error(msg)
             raise ValueError(msg)
 
-        # Calculate dc_drive
-        self.net['dc_drive'] = C_m / tau_m * ((1. - scaling_factor) * (x1_ext + x1))
+        # Contribution from the external Poisson input
+        mean_input_ext = 1e-3 * J_ext * tau_syn_ext * K_ext * nu_ext
+
+        # Contribution from the recurrent populations
+        mean_input_rec = 1e-3 * self.net['p_transmit'] * (
+            J * tau_syn * K) @ full_mean_rates
+
+        return mean_input_rec + mean_input_ext
 
     def sortIndices(self):
         """

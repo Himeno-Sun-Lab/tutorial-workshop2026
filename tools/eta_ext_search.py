@@ -1,22 +1,19 @@
 #!/usr/bin/env python3
-"""Find the external drive (``eta_ext``) that keeps a DOWNSCALED network alive.
+"""Find the external drive (``eta_ext``) that sets a DOWNSCALED network's working point.
 
 Why this exists
 ---------------
 Downscaling multiplies in-degrees by ``K_scaling`` and weights by
 ``1/sqrt(K_scaling)``.  That preserves the *variance* of the synaptic input but
 shrinks its *mean* by ``sqrt(K_scaling)``.  ``Network.extraDCforScaledNetwork()``
-adds a compensating DC current, but it evaluates the compensation from the
-already-scaled weights and in-degrees, so it restores
-``(1-sqrt(k))*sqrt(k)*mu`` rather than ``(1-sqrt(k))*mu`` -- about 28% of the
-missing mean drive at ``k = 0.1`` instead of 90%.
-
-Consequence, measured on this repository at ``N_scaling=0.005, K_scaling=0.1``:
-with the default ``eta_ext = 1.1`` the mean drive reaches only ~44% of the
-distance to threshold and the network emits nothing beyond the spikes caused by
-its random initial membrane potentials.  Existing ``local_*`` experiments only
-fire because Abeta neurons have ``V_th - E_L = 15 mV`` instead of 25 mV and
-ignite the network; with ``Abeta_ratio_E = 0`` the same configuration is silent.
+adds back the missing ``(1-sqrt(k))*mu`` as a DC current (van Albada et al.
+2015), so the downscaled network approximates the full-scale network with the
+same parameters -- provided ``fullscale_rates`` are the rates of *that*
+full-scale network.  The model's ``base_theory_rates.pkl`` matches only the
+repository defaults; for any other configuration generate matching rates with
+``tools/fullscale_rates.py`` and pass them with ``--fullscale-rates``.  The
+rates depend on ``eta_ext`` itself, so a final candidate must be confirmed with
+rates computed at that candidate (see the README).
 
 This script searches for the ``eta_ext`` that (a) wakes the network up and
 (b) puts it in the rate band the project targets elsewhere
@@ -39,21 +36,20 @@ Three evaluation methods, cheapest first
               it, which matters precisely for downscaled networks.  Predicts
               rates without simulating.  Cost: ~5 s per eta.  It is a diffusion
               approximation that ignores weight and delay distributions and all
-              correlations, so measured against simulation at
-              ``N_scaling=0.005, K_scaling=0.1`` it under-predicts rates by
-              ~20-25% and therefore over-estimates the required ``eta_ext`` by
-              ~15% (boundary at 1.57 where simulation finds 1.38).  Use it to
-              bracket, then verify with ``--method scan``.
+              correlations; with the earlier, incorrect DC compensation it
+              under-predicted simulated rates by ~20-25% at
+              ``N_scaling=0.005, K_scaling=0.1`` (not re-measured since).  Use
+              it to bracket, then verify with ``--method scan``.
 
 ``simulate``  Build the network, run NEST, count spikes.  Ground truth.
               Cost: ~12 s per eta at N_scaling=0.005 on 4 threads.
 
-A caveat for all rate-based searching: once the network is awake, recurrent
-inhibition tracks the external drive, so the rate-vs-eta curve has a long flat
-stretch (measured at N_scaling=0.005, K_scaling=0.1: E stays near 2.2-2.5 Hz
-between eta 1.9 and 2.8 before climbing again).  In that stretch small rate
-differences are dominated by finite-size noise, so pass several ``--seeds`` if
-you need the boundary to a couple of decimals.
+A caveat for all rate-based searching: recurrent inhibition tracks the
+external drive, so rates rise slowly with eta (measured at N_scaling=0.005,
+K_scaling=0.1 with self-consistent full-scale rates: E 0.3 Hz at eta 1.1,
+3.0 Hz at 4.5, 5.1 Hz at 7.0).  Seed-to-seed differences of ~0.2 Hz are then
+comparable to the effect of a 0.2 change in eta, so pass several ``--seeds``
+if you need the boundary to a couple of decimals.
 
 Where this lives
 ----------------
@@ -78,8 +74,8 @@ Examples
 
     # calibrate for one individual: their connectome and their amyloid map
     python tools/eta_ext_search.py \
-        --con-path   ../model/experimental_data/ADNI/023_S_6661_sc.mat \
-        --abeta-ratio ../model/experimental_data/ADNI/023_S_6661_abeta_ratio.csv
+        --con-path   ../model/experimental_data/ADNI/AD_SC.mat \
+        --abeta-ratio ../model/experimental_data/ADNI/AD_abeta_ratio.csv
 
     # average three seeds per candidate (slower, much less noisy)
     python tools/eta_ext_search.py --seeds 2903 1234 5678
@@ -205,8 +201,7 @@ class NetworkFactory:
             "N_scaling": args.n_scaling,
             "K_scaling": args.k_scaling,
             "scaling_type": args.scaling_type,
-            "fullscale_rates": str(MODEL_ROOT / "simulated_data"
-                                   / "base_theory_rates.pkl"),
+            "fullscale_rates": str(args.fullscale_rates),
             "scaling_factors_recurrent": {"cc_scalingEtoE": args.cc_e_to_e,
                                           "cc_scalingEtoI": args.cc_e_to_i},
             "input_params": {"eta_ext": float(eta)},
@@ -558,6 +553,12 @@ def parse_args(argv=None):
     g.add_argument("--con-path", type=Path, default=None,
                    help="structural connectivity .mat to use instead of the "
                         "group-average one, e.g. an individual's tractography")
+    g.add_argument("--fullscale-rates", type=Path, default=None,
+                   help="full-scale population rates (pkl) the DC compensation "
+                        "is computed from; they must belong to the configuration "
+                        "being calibrated (see tools/fullscale_rates.py). "
+                        "Default: the model's base_theory_rates.pkl, which "
+                        "matches only the repository defaults")
 
     g = p.add_argument_group("simulation")
     g.add_argument("--t-sim", type=float, default=2000.0,
@@ -591,8 +592,8 @@ def parse_args(argv=None):
                         "(default: the lower edge of --target-e; pass the band "
                         "midpoint for a result less sensitive to seed noise)")
     g.add_argument("--target-fraction", type=float, default=1.1,
-                   help="mean drive relative to threshold that --method "
-                        "analytic solves for (1.1 = the full-scale value)")
+                   help="external + DC drive relative to threshold that "
+                        "--method analytic solves for")
     g.add_argument("--iterations", type=int, default=6,
                    help="bisection steps per boundary")
     g.add_argument("--probe-pop", type=parse_pop,
@@ -619,6 +620,8 @@ def parse_args(argv=None):
         args.abeta_ratio = str(Path(args.abeta_ratio).resolve())
     if args.model_root is not None:
         args.model_root = Path(args.model_root).resolve()
+    if args.fullscale_rates is not None:
+        args.fullscale_rates = Path(args.fullscale_rates).resolve()
     # The evaluator and the search strategy are independent: --eta-list turns
     # any method into a scan, and --method theory swaps the evaluator.
     args.eval_method = "theory" if args.method == "theory" else "simulate"
@@ -631,6 +634,8 @@ def main(argv=None):
     args = parse_args(argv)
     args.outdir = Path(args.outdir).resolve()
     root = bootstrap(find_model_repo(args.model_root))
+    if args.fullscale_rates is None:
+        args.fullscale_rates = root / "simulated_data" / "base_theory_rates.pkl"
     print(f"model             : {root}")
     print(f"results directory : {args.outdir}")
     (args.outdir / "networks").mkdir(parents=True, exist_ok=True)
@@ -659,8 +664,8 @@ def main(argv=None):
           f"{ana['to_threshold_mV']:.1f} mV")
     print(f"  at the repository default eta_ext = 1.1 the drive reaches "
           f"{100 * ana['fraction_at_1p1']:.0f}% of threshold")
-    print(f"  eta_ext restoring {args.target_fraction:.2f} x threshold "
-          f"(the full-scale value): {ana['eta']:.3f}")
+    print(f"  eta_ext reaching {args.target_fraction:.2f} x threshold: "
+          f"{ana['eta']:.3f}")
     print()
 
     summary = {"config": {k: (str(v) if isinstance(v, (Path, tuple)) else v)
@@ -809,10 +814,9 @@ def finish(args, evaluate, results, summary):
         print(f"   network stops being silent at eta_ext ~ "
               f"{summary['eta_alive']:.3f}")
     if args.eval_method == "theory":
-        print("\nNOTE: measured against simulation at N_scaling=0.005, "
-              "K_scaling=0.1, the mean-field\n      under-predicts rates by "
-              "~20-25%, i.e. it over-estimates the required eta_ext by ~15%\n"
-              "      (boundary at 1.57 where simulation finds 1.38).")
+        print("\nNOTE: the mean-field ignores weight/delay distributions and "
+              "correlations;\n      treat its eta_ext as a bracket, not an "
+              "answer.")
         if best:
             print(f"      Verify with:  python tools/eta_ext_search.py "
                   f"--method scan --eta-list {best['eta']:.2f}")
