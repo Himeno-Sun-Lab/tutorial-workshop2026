@@ -3774,6 +3774,8 @@ class Analysis():
                             linestyle="None"
                         )
     
+        self._rasterLegend(ax1, [('Excitatory (E)', colors['E']),
+                                 ('Inhibitory (I)', colors['I'])])
         ax1.axis([low * ms_to_s, high * ms_to_s, gid_norm, 0])
         ax1.set_xlabel('Time (s)', fontdict={"size": 12})
         ax1.tick_params(axis="x", labelsize=12)
@@ -4017,6 +4019,8 @@ class Analysis():
                                 linestyle="None"
                             )
 
+            self._rasterLegend(ax, [('E', colors['E']), ('I', colors['I'])],
+                               fontsize=7)
             ax.axis([raster_low * ms_to_s, raster_high * ms_to_s, gid_norm, 0])
             ax.set_xlabel('Time (s)')
             ax.set_yticks(ind)
