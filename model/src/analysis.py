@@ -585,8 +585,10 @@ class Analysis():
             weights = self.net_dict['weights'].loc[index, index]
             synapses = self.net_dict['synapses_internal'].loc[index, index]
             indeg = synapses.div(NN, axis=0)
-            dt = self.sim_dict['sim_resolution']
             binsize = self.ana_dict['rate_histogram']['binsize']
+            # The kernel is applied to the rate histogram, so it must be
+            # sampled at the histogram's bin width, not at sim_resolution.
+            dt = binsize
             t_start = 0.
             t_stop = self.ana_dict['rate_histogram']['t_stop']
             if t_stop is None:
@@ -3322,6 +3324,13 @@ class Analysis():
         # functional connectivity based on synaptic input currents
         # (df_sim_fc_syn)
         df_sim_fc_syn = synaptic_currents[synaptic_currents.index >= tmin].corr()
+        if df_sim_fc_syn.isna().all().all() and self.logger:
+            self.logger.warning(
+                'Simulated functional connectivity from synaptic currents is '
+                'undefined: every area has a constant input current after '
+                'tmin=%s ms, i.e. the network is silent in the analysis window. '
+                'Every correlation involving it is reported as NaN. Check the '
+                'working point (rates.pkl) before reading anything else.', tmin)
         if exclude_diagonal:
             np.fill_diagonal(df_sim_fc_syn.values, np.nan)
 
@@ -3654,6 +3663,36 @@ class Analysis():
         plt.clf()
         plt.close(fig)
 
+    def _rasterWindow(self):
+        """
+        Time window (ms) of the raster plots, ``ana_dict['plotRasterArea']``.
+
+        A window that reaches outside the simulated time [0, t_sim] - typically
+        left behind when t_sim was changed - would give empty rasters. It is
+        moved to the end of the simulation instead, keeping its length, and a
+        warning names both windows.
+
+        Returns
+        -------
+        (low, high) : tuple of float
+        """
+        low = float(self.ana_dict['plotRasterArea']['low'])
+        high = float(self.ana_dict['plotRasterArea']['high'])
+        t_sim = float(self.sim_dict['t_sim'])
+        if low < 0. or high > t_sim or low >= high:
+            length = min(high - low if high > low else 1000., t_sim)
+            new_low, new_high = t_sim - length, t_sim
+            if not getattr(self, '_raster_window_warned', False):
+                self._raster_window_warned = True
+                if self.logger:
+                    self.logger.warning(
+                        'Raster window [%g, %g] ms lies outside the simulated '
+                        '[0, %g] ms; using [%g, %g] ms. Set '
+                        'ana_params["plotRasterArea"] low / high accordingly.',
+                        low, high, t_sim, new_low, new_high)
+            low, high = new_low, new_high
+        return low, high
+
     @staticmethod
     def _rasterLegend(ax, entries, fontsize=10):
         """
@@ -3685,8 +3724,7 @@ class Analysis():
             self.popGids = self._readPopGids()
         extension = self.ana_dict['extension']
         fraction = self.ana_dict['plotRasterArea']['fraction']
-        low = self.ana_dict['plotRasterArea']['low']
-        high = self.ana_dict['plotRasterArea']['high']
+        low, high = self._rasterWindow()
         fig = plt.figure(1, figsize=(8, 7))
         ax1 = fig.add_subplot(1, 1, 1)
         ind = []
@@ -3782,8 +3820,7 @@ class Analysis():
 
         extension = self.ana_dict['extension']
         fraction = self.ana_dict['plotRasterArea']['fraction']
-        low = self.ana_dict['plotRasterArea']['low']
-        high = self.ana_dict['plotRasterArea']['high']
+        low, high = self._rasterWindow()
         fig = plt.figure(1, figsize=(8, 7))
         ax1 = fig.add_subplot(1, 1, 1)
         ind = []
@@ -3887,8 +3924,7 @@ class Analysis():
         
         colors = {'E': '#4c72b0ff', 'I': '#c44e52ff'}
         raster_fraction = self.ana_dict['plotRasterArea']['fraction']
-        raster_low = self.ana_dict['plotRasterArea']['low']
-        raster_high = self.ana_dict['plotRasterArea']['high']
+        raster_low, raster_high = self._rasterWindow()
         roman_to_arabic_numerals = {
             'II/III': '2/3',
             'IV': '4',
