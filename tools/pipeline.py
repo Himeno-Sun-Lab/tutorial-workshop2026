@@ -8,17 +8,17 @@ notebook and the three pipeline stages:
 * how a run is started (``subprocess`` into ``model/src/snakemake_*.py``),
 * how the hash files a run writes are turned into the directory it wrote to,
 * how a figure or a result file of a finished run is loaded - a laptop run, or
-  a full-scale result brought back from the cluster.
+  a full-scale run imported from the server it was computed on.
 
 **No reuse on the laptop.**  Every ``run_all()`` starts from an empty
 ``results/<run>/`` and runs all of its stages again: nothing is skipped because
 a hash matches, nothing is read from an earlier run's cache, and two runs never
 share a directory.  A run costs minutes here, and a result you can trust to
 come from the parameters on screen is worth more than the minutes.  Reuse - only
-the stages whose parameters changed are re-run - is what the cluster workflow
-(``cluster/Snakefile``) is for, where a stage costs hours.
+the stages whose parameters changed are re-run - belongs to the server's
+Snakemake workflow, where a stage costs hours.
 
-Layout of one run::
+Layout of one laptop run::
 
     results/<run>/experiment.py            driver: experiments/<experiment>.py,
                                            with outpath pointed here
@@ -26,10 +26,20 @@ Layout of one run::
     results/<run>/log/<stage>.log
     results/<run>/<net_hash>/<sim_hash>/<ana_hash>/plots/ ...
 
-A full-scale result is a bundle the cluster workflow writes to
-``fullscale/<run>/`` (``run.json``, the result tables, the summary figures).
+A full-scale run is imported unchanged, in the layout the server's Snakemake
+workflow wrote it - nothing is converted, so the hashes still name the
+directories they were computed for::
+
+    fullscale/experiments/<run>.py                     the experiment file
+    fullscale/experiments/<run>.{network,simulation,analysis}_hash
+    fullscale/out/<net_hash>/<sim_hash>/<ana_hash>/    the three levels
+    fullscale/logs/<run>_*                             the stage logs
+    fullscale/experimental_data/...                    the empirical BOLD it was
+                                                       compared against, under
+                                                       its server path
+
 Every reader below - ``show``, ``rates``, ``load_result``, ``area_mean_rate`` -
-accepts its name in place of a laptop run.
+accepts its name in place of a laptop run.  The notebook only reads it.
 
 The notebook imports from here so that its cells show the *model* - parameters,
 rates, pathology - rather than path juggling.  Everything is importable outside
@@ -41,7 +51,6 @@ the notebook as well::
 Nothing here writes into ``model/``: every output goes to ``results/``.
 """
 
-import json
 import os
 import runpy
 import shutil
@@ -186,36 +195,31 @@ def run_stage(stage, run, threads=4, quiet=False):
 
 
 # ------------------------------------------------------------ hashes and paths --
-def fullscale_bundle(run):
-    """The directory of a full-scale bundle called `run`, or None."""
-    d = FULLSCALE / run
-    return d if (d / "run.json").exists() else None
+LEVELS = ("network", "simulation", "analysis")
+
+
+def _imported_hash_file(run, level):
+    return FULLSCALE / "experiments" / f"{run}.{level}_hash"
 
 
 def has_fullscale(run):
-    """Whether the full-scale result `run` has been brought back from the cluster."""
-    return fullscale_bundle(run) is not None
+    """Whether the full-scale run `run` has been imported into fullscale/."""
+    return all(_imported_hash_file(run, level).exists() for level in LEVELS)
 
 
-def fullscale_info(run):
-    """What a full-scale bundle was run with: scale, drive, seed, commit, hashes."""
-    d = fullscale_bundle(run)
-    if d is None:
-        raise FileNotFoundError(_missing(run))
-    return json.loads((d / "run.json").read_text())
+def _store(run):
+    """Where `run` lives: its hash file per level, and the directory they index."""
+    if has_fullscale(run):
+        return ({level: _imported_hash_file(run, level) for level in LEVELS},
+                FULLSCALE / "out")
+    return ({level: RESULTS / run / f"{level}_hash" for level in LEVELS},
+            RESULTS / run)
 
 
 def hashes(run):
     """The hashes the run has written so far, as a dict."""
-    d = fullscale_bundle(run)
-    if d is not None:
-        return fullscale_info(run)["hashes"]
-    out = {}
-    for stage, name in STAGE_HASH_FILE.items():
-        f = RESULTS / run / name
-        if f.exists():
-            out[name.removesuffix("_hash")] = f.read_text().strip()
-    return out
+    files, _ = _store(run)
+    return {level: f.read_text().strip() for level, f in files.items() if f.exists()}
 
 
 def stage_hash(run, stage):
@@ -231,41 +235,113 @@ def print_hashes(run):
 
 
 def _missing(run):
-    if run.startswith("full"):
-        return (f"no full-scale result '{run}' in {FULLSCALE} - run the cluster "
-                "workflow (Part 7) and copy its fullscale/ folder here")
-    return f"no completed run '{run}' - run_all({run!r}) first"
+    if (EXPERIMENTS / f"{run}.py").exists():
+        return f"no completed run '{run}' - run_all({run!r}) first"
+    return (f"no run '{run}': not a laptop run, and no full-scale run of that name "
+            f"in {FULLSCALE / 'experiments'}")
 
 
-def _hashes_for(run, *stages):
+def _hashes_for(run, *levels):
     h = hashes(run)
-    if not all(s in h for s in stages):
+    if not all(level in h for level in levels):
         raise FileNotFoundError(_missing(run))
-    return [h[s] for s in stages]
+    return [h[level] for level in levels]
 
 
 def net_dir(run):
-    """The network directory of a completed stage 1 (laptop runs only)."""
+    """The network directory of a completed stage 1."""
     (nh,) = _hashes_for(run, "network")
-    return RESULTS / run / nh
+    return _store(run)[1] / nh
 
 
 def sim_dir(run):
-    """The simulation directory of a completed stage 2 (a bundle holds its tables)."""
-    d = fullscale_bundle(run)
-    if d is not None:
-        return d
+    """The simulation directory of a completed stage 2."""
     nh, sh = _hashes_for(run, "network", "simulation")
-    return RESULTS / run / nh / sh
+    return _store(run)[1] / nh / sh
 
 
 def run_dir(run):
-    """The analysis directory of a completed run, or a full-scale bundle."""
-    d = fullscale_bundle(run)
-    if d is not None:
-        return d
+    """The analysis directory of a completed run."""
     nh, sh, ah = _hashes_for(run, "network", "simulation", "analysis")
-    return RESULTS / run / nh / sh / ah
+    return _store(run)[1] / nh / sh / ah
+
+
+def fullscale_info(run):
+    """What an imported full-scale run was computed with, as a Series.
+
+    Read from the parameter dumps the model wrote next to its output
+    (``network_params.yaml``, ``sim.yaml``) and from the network's own tables -
+    not from the experiment file, whose paths point at the server.
+    """
+    import yaml
+
+    if not has_fullscale(run):
+        raise FileNotFoundError(_missing(run))
+    net = yaml.unsafe_load((net_dir(run) / "network_params.yaml").read_text())
+    sim = yaml.unsafe_load((sim_dir(run) / "sim.yaml").read_text())
+    gains = net["scaling_factors_recurrent"]
+    types = list(net.get("neuron_types") or {})
+    if not types and net.get("Abeta"):      # dumped before neuron_types existed
+        types = ["Abeta"]
+    return pd.Series({
+        "N_scaling": net["N_scaling"],
+        "K_scaling": net["K_scaling"],
+        "scaling_type": net["scaling_type"],
+        "neurons": int(pd.read_pickle(net_dir(run) / "neuron_numbers.pkl").sum()),
+        "internal synapses": f"{pd.read_pickle(net_dir(run) / 'synapses_internal.pkl').values.sum():.3g}",
+        "eta_ext": net["input_params"]["eta_ext"],
+        "cc_scalingEtoE / EtoI": f"{gains['cc_scalingEtoE']} / {gains['cc_scalingEtoI']}",
+        "neuron types": ", ".join(types) or "none",
+        "connectome": Path(net["predictive_connectomic_params"]["con_path"]).name,
+        "t_sim (ms)": sim["t_sim"],
+        "master_seed": sim["master_seed"],
+        **{f"{level} hash": h for level, h in hashes(run).items()},
+    }, name=run)
+
+
+def fullscale_fc(run, signal="synaptic"):
+    """Simulated FC and the person's empirical FC of an imported run.
+
+    Returns ``(simulated, empirical)``, two 34x34 DataFrames over the same
+    alphabetically sorted areas - the matrices behind ``exp__sim_syn__corr_rh``
+    (``signal="synaptic"``) or ``exp__sim_bold__corr_rh`` (``signal="bold"``) in
+    ``correlations.txt``.  Both are computed the way ``analysis.py`` does it.
+
+    * synaptic: correlation of the area-averaged synaptic input currents
+      (``input_current.pkl``) from ``plotConnectivities.tmin`` on;
+    * bold: the stage-2 cache ``bold_correlation.pkl``;
+    * empirical: correlation of the BOLD time series the run was compared
+      against.  ``ana.yaml`` names it by its server path; it is imported under
+      the same path below ``experimental_data/``, i.e.
+      ``fullscale/experimental_data/...``.  Its right half (nodes 34:68) is the
+      simulated hemisphere; the nodes are labelled with the FreeSurfer order of
+      the model's own ``ROIs.txt``, as ``analysis.py`` does.
+    """
+    import numpy as np
+    import yaml
+
+    if not has_fullscale(run):
+        raise FileNotFoundError(_missing(run))
+    ana = yaml.unsafe_load((run_dir(run) / "ana.yaml").read_text())
+    remote = Path(ana["experimental_fc"])
+    local = FULLSCALE / Path(*remote.parts[remote.parts.index("experimental_data"):])
+    if not local.exists():
+        raise FileNotFoundError(f"the empirical BOLD of {run} is not imported: {local}")
+
+    roi_file = MODEL_ROOT / "experimental_data" / "senden" / "rsData_7T_DKparcel" / "ROIs.txt"
+    areas = [line.strip().split("-")[-1] for line in roi_file.read_text().splitlines()[14:48]]
+    bold = np.load(local)[:, 34:68, 0]
+    empirical = pd.DataFrame(bold, columns=areas).corr()
+
+    if signal == "synaptic":
+        currents = pd.read_pickle(run_dir(run) / "input_current.pkl").T   # time x area
+        simulated = currents[currents.index >= ana["plotConnectivities"]["tmin"]].corr()
+    elif signal == "bold":
+        simulated = pd.read_pickle(sim_dir(run) / "bold_correlation.pkl")
+    else:
+        raise ValueError(f"signal must be 'synaptic' or 'bold', not {signal!r}")
+    return (simulated.sort_index().sort_index(axis=1),
+            empirical.sort_index().sort_index(axis=1))
 
 
 def describe_outputs(run):
@@ -435,7 +511,7 @@ def check_data(path):
         table = pd.read_csv(path)
         print(f"  columns   : {list(table.columns)}")
         value_col = next((c for c in table.columns
-                          if c.lower() in ("ratio", "abeta_ratio", "fraction", "value")), None)
+                          if c.lower() in ("ratio", "fraction", "value")), None)
         if "area" not in table.columns:
             problems.append("no 'area' column")
         if value_col is None:
@@ -487,22 +563,178 @@ def master_seed(experiment):
     return seed
 
 
-def rates_for_seed(experiment, seed, t_start=1000.0, t_stop=5000.0, threads=4):
+def rates_for_seed(experiment, seed, t_start=None, t_stop=None, threads=4):
     """Population rates of `experiment` run with `seed` - network and simulation.
 
     The experiment's own seed returns the finished run's ``rates.pkl``.  Any other
     seed is a run of its own, ``<experiment>_seed<seed>``, started from scratch
     like every other: its network is built again rather than borrowed, and the
     rates are read straight from the spike files (the analysis stage is skipped).
+
+    The window defaults to the one ``rates.pkl`` is computed over - from the
+    experiment's ``ana_params["meanFiringRate"]["t_start"]`` to its ``t_sim`` - so
+    that the rates of every seed are comparable.
     """
     if seed == master_seed(experiment):
         return rates(experiment)
 
     from eta_ext_search import read_population_rates      # tutorial's own helper
 
+    exp = _experiment(experiment)
+    if t_start is None:
+        defaults = runpy.run_path(str(MODEL_ROOT / "src" / "default_ana_params.py"))["params"]
+        t_start = exp.get("ana_params", {}).get("meanFiringRate", {}).get(
+            "t_start", defaults["meanFiringRate"]["t_start"])
+    if t_stop is None:
+        defaults = runpy.run_path(str(MODEL_ROOT / "src" / "default_sim_params.py"))["params"]
+        t_stop = exp.get("sim_params", {}).get("t_sim", defaults["t_sim"])
+
     run = run_all(experiment, stages=("network", "simulate"), threads=threads,
                   quiet=True, seed=seed)
     return read_population_rates(sim_dir(run), t_start, t_stop)
+
+
+# ------------------------------------------------------ working-point calibration --
+# The two tools of the calibration, tools/eta_ext_search.py and
+# tools/fullscale_rates.py, are command-line programs. These wrappers read the
+# settings they need from an experiment file and write everything under
+# results/calibration/<experiment>/ - never into experiments/, so a calibration
+# run cannot overwrite the rates an experiment ships with.
+CALIBRATION = RESULTS / "calibration"
+
+
+def _run_tool(script, args, log, show):
+    """Run ``tools/<script>`` and stream the lines `show` returns text for."""
+    cmd = [sys.executable, str(TUTORIAL / "tools" / script), *map(str, args)]
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
+    t0 = time.time()
+    with open(log, "w") as fh, subprocess.Popen(
+            cmd, cwd=TUTORIAL, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+            text=True, env=env) as proc:
+        for line in proc.stdout:
+            fh.write(line)
+            text = show(line)
+            if text:
+                print(text, flush=True)
+    if proc.returncode != 0:
+        print(Path(log).read_text()[-3000:])
+        raise RuntimeError(f"{script} failed - log: {log}")
+    return time.time() - t0
+
+
+def _net_params(experiment):
+    """``(net_params, defaults)``: an experiment's top-level network parameters,
+    completed from the model defaults, and the defaults themselves."""
+    cwd = os.getcwd()
+    os.chdir(MODEL_ROOT)          # the defaults build their data paths on the cwd
+    try:
+        defaults = runpy.run_path(str(MODEL_ROOT / "src" / "default_net_params.py"))["params"]
+    finally:
+        os.chdir(cwd)
+    return {**defaults, **_experiment(experiment)["net_params"]}, defaults
+
+
+def eta_search(experiment, etas, seeds=None, t_sim=2000.0, threads=4):
+    """Mean E / I rates of `experiment` for every external drive in `etas`.
+
+    Runs ``tools/eta_ext_search.py --method scan``: for every ``eta_ext`` a
+    network is built with the experiment's scale, long-range gains, connectome
+    and full-scale rates, simulated for `t_sim` ms (the first 500 ms discarded)
+    and its population rates counted.
+
+    Only a healthy experiment can be scanned.  One with neuron types (e.g. the
+    amyloid experiment) raises: it keeps the drive of its healthy control, and
+    scanning it would invite pulling it back to the healthy working point.
+    Changed neuron parameters cannot be passed to the tool either; they are
+    reported, since the scan then runs the default neurons.
+
+    Returns a DataFrame with one row per ``eta_ext`` (mean rates in Hz, drive
+    as a fraction of the distance to threshold, ``alive``).
+    """
+    net, defaults = _net_params(experiment)
+    if net.get("neuron_types"):
+        raise ValueError(
+            f"{experiment} declares neuron types ({', '.join(net['neuron_types'])}). "
+            "A pathological experiment keeps the drive of its healthy control - "
+            "recalibrating it would pull it back to the healthy working point. "
+            "Scan the healthy control instead (e.g. tutorial_CN).")
+    out = CALIBRATION / experiment / "eta_search"
+    out.mkdir(parents=True, exist_ok=True)
+    gains = net["scaling_factors_recurrent"]
+    args = ["--method", "scan", "--eta-list", *etas,
+            "--n-scaling", net["N_scaling"], "--k-scaling", net["K_scaling"],
+            "--scaling-type", net["scaling_type"],
+            "--cc-e-to-e", gains.get("cc_scalingEtoE", 1.0),
+            "--cc-e-to-i", gains.get("cc_scalingEtoI", 2.0),
+            "--seeds", *(seeds or [master_seed(experiment)]),
+            "--t-sim", t_sim, "--threads", threads,
+            "--outdir", out, "--log-level", "WARNING", "--no-plot"]
+    if net.get("fullscale_rates"):
+        args += ["--fullscale-rates", net["fullscale_rates"]]
+    con = net["predictive_connectomic_params"].get("con_path")
+    if con and con != defaults["predictive_connectomic_params"]["con_path"]:
+        args += ["--con-path", con]          # an individual connectome
+
+    ignored = [k for k in ("neuron_params_E", "neuron_params_I",
+                           "neuron_model_E", "neuron_model_I")
+               if net[k] != defaults[k]]
+    print(f"eta_ext scan of {experiment}: N_scaling={net['N_scaling']}, "
+          f"K_scaling={net['K_scaling']}, {len(etas)} values x {t_sim:.0f} ms")
+    if ignored:
+        print(f"  WARNING: {experiment} sets {', '.join(ignored)}, which the scan cannot\n"
+              f"  pass on: it runs the default neurons, with {experiment}'s full-scale\n"
+              f"  rates - the rates below do not belong to {experiment}.")
+
+    def show(line):
+        line = line.rstrip()
+        return f"  {line.strip()}" if line.strip().startswith("eta=") else None
+
+    elapsed = _run_tool("eta_ext_search.py", args, out / "eta_search.log", show)
+    table = pd.read_csv(out / "eta_search.csv")
+    print(f"  done in {elapsed:.0f} s - {out.relative_to(TUTORIAL)}/")
+    return table[["eta", "E", "I", "drive_fraction", "alive"]].rename(
+        columns={"E": "E (Hz)", "I": "I (Hz)", "drive_fraction": "drive / threshold"})
+
+
+def fullscale_rates(experiment, eta=None, iters=40, threads=8):
+    """Self-consistent full-scale rates of `experiment` (optionally at `eta`).
+
+    Runs ``tools/fullscale_rates.py``: starting from the mean-field rates of the
+    default model, it iterates rates -> DC compensation -> simulate -> rates with
+    damping until the downscaled network reproduces the rates its DC current was
+    computed from.  Prints one line per iteration; the last columns, the mean
+    change per step, must have levelled off at the finite-size noise.
+
+    Returns ``(rates, path)``: the population rates (Hz) and the pickle they
+    were written to, ready for ``net_params["fullscale_rates"]``.
+    """
+    import json
+
+    tag = "" if eta is None else f"_eta{float(eta):g}"
+    out = CALIBRATION / experiment / f"fullscale_rates{tag}.pkl"
+    work = CALIBRATION / experiment / f"fullscale_rates{tag}"
+    work.mkdir(parents=True, exist_ok=True)
+    args = [EXPERIMENTS / f"{experiment}.py", "--out", out, "--iters", iters,
+            "--threads", threads, "--workdir", work]
+    if eta is not None:
+        args += ["--eta", eta]
+    print(f"full-scale rates of {experiment}"
+          f"{'' if eta is None else f' at eta_ext = {eta}'}: {iters} iterations")
+    print("    it    E in   I in   E sim   I sim   mean |step| E / I  (Hz)")
+
+    def show(line):
+        if not line.startswith("{"):
+            return None
+        r = json.loads(line)
+        return (f"  {r['it']:4d}  {r['E_in']:6.2f} {r['I_in']:6.2f}  "
+                f"{r['E_sim']:6.2f} {r['I_sim']:6.2f}   {r['dE']:6.2f} / {r['dI']:.2f}")
+
+    elapsed = _run_tool("fullscale_rates.py", args, work / "fullscale_rates.log", show)
+    rates_ = pd.read_pickle(out)
+    level = rates_.index.get_level_values(-1)
+    print(f"  done in {elapsed / 60:.1f} min: E {rates_[level == 'E'].mean():.2f} Hz, "
+          f"I {rates_[level == 'I'].mean():.2f} Hz - {out.relative_to(TUTORIAL)}")
+    return rates_, out
 
 
 # ---------------------------------------------------------------- file excerpts --
