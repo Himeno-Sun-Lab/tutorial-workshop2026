@@ -1,3 +1,5 @@
+import warnings
+
 import numpy as np
 import pandas as pd
 from scipy.integrate import solve_ivp
@@ -32,15 +34,32 @@ def _build_inputs(net_dict):
 
     Returns a dict with the (empty-population-masked) index ``N``, the input
     parameter dicts ``input_prms`` / ``input_prms_scld`` (as consumed by
-    ``nnmt.lif._general._mean_input`` / ``_std_input``), and the per-population
+    ``nnmt.lif._general._mean_input`` / ``_std_input``), the per-population
     neuron parameters ``tau_m``, ``tau_syn``, ``t_ref``, ``V_th``, ``V_r`` (mV,
-    relative to the leak potential). Shared by ``solve`` and ``working_point``.
+    relative to the leak potential), and ``mu_dc`` (mV), the mean
+    depolarisation by the DC current ``dc_drive`` - the downscaling
+    compensation, which nnmt's ``_mean_input`` does not see and every caller
+    has to add. Shared by ``solve``, ``working_point`` and
+    ``oscillation_spectrum``.
+
+    In-degrees are multiplied by ``p_transmit``: a synapse that transmits a
+    spike with probability p contributes like p synapses to mean and variance.
+
+    The theory uses the base neuron parameters for every population. Custom
+    neuron types (``neuron_types``) are not modelled; a warning names them.
     """
+    types = [name for name, t in (net_dict.get('neuron_types') or {}).items()
+             if any(np.any(np.asarray(_ratio_values(t['ratio_' + X])) > 0)
+                    for X in ('E', 'I'))]
+    if types:
+        warnings.warn('mean-field theory uses the base neuron parameters; the '
+                      'neuron types {} are not modelled'.format(types))
+
     # collect network parameters, make sure everything is sorted the same way
     N = net_dict['neuron_numbers'].sort_index()
     nu_ext = net_dict['rate_ext'].sort_index()  # 1/s
     K = net_dict['synapses_internal'].sort_index(axis=0).sort_index(axis=1)
-    K = K.div(N, axis=0)
+    K = K.div(N, axis=0) * net_dict.get('p_transmit', 1.0)
     K_ext = net_dict['synapses_external'].sort_index()
     K_ext = K_ext.div(N)
     J = net_dict['weights'].sort_index(axis=0).sort_index(axis=1)
@@ -87,6 +106,12 @@ def _build_inputs(net_dict):
     V_r.loc[ix_E] = lif_params_E['V_reset'] - lif_params_E['E_L']  # mV
     V_r.loc[ix_I] = lif_params_I['V_reset'] - lif_params_I['E_L']  # mV
 
+    # DC current (pA) -> mean depolarisation tau_m * I / C_m (mV)
+    dc = net_dict.get('dc_drive')
+    dc = (pd.Series(0., index=N.index) if dc is None
+          else dc.sort_index().reindex(N.index).fillna(0.))
+    mu_dc = ((tau_m * 1e3) * dc / C_m_ext).values  # tau_m is in s -> ms
+
     # scale weights
     J *= 1e3*tau_syn/C_m  # mV
     J_ext *= 1e3*tau_syn_ext/C_m_ext  # mV
@@ -96,7 +121,15 @@ def _build_inputs(net_dict):
     input_prms_scld = dict(tau_m=tau_m, J=J, K=K/tau_syn, J_ext=np.diag(J_ext),
                            K_ext=np.diag(K_ext/tau_syn_ext), nu_ext=nu_ext)
     return dict(N=N, input_prms=input_prms, input_prms_scld=input_prms_scld,
-                tau_m=tau_m, tau_syn=tau_syn, t_ref=t_ref, V_th=V_th, V_r=V_r)
+                tau_m=tau_m, tau_syn=tau_syn, t_ref=t_ref, V_th=V_th, V_r=V_r,
+                mu_dc=mu_dc)
+
+
+def _ratio_values(ratio):
+    """All numbers of a (normalized) neuron-type ratio, flattened."""
+    if isinstance(ratio, dict):
+        return [v for val in ratio.values() for v in _ratio_values(val)]
+    return [float(ratio)]
 
 
 def solve(net_dict, t, initial_rates):
@@ -111,10 +144,11 @@ def solve(net_dict, t, initial_rates):
     N, input_prms, input_prms_scld = p['N'], p['input_prms'], p['input_prms_scld']
     tau_m, t_ref, V_th, V_r, tau_syn = (p['tau_m'], p['t_ref'], p['V_th'],
                                         p['V_r'], p['tau_syn'])
+    mu_dc = p['mu_dc']
 
     #  ODE for (pseudotime) fixed point iteration
     def aux_ode(_, nu_in):
-        mu = _mean_input(nu=nu_in, **input_prms)
+        mu = _mean_input(nu=nu_in, **input_prms) + mu_dc
         sig = _std_input(nu=nu_in, **input_prms)
         tau_eff = sig**2 / _std_input(nu=nu_in, **input_prms_scld)**2
         nu_out = _firing_rate_shift(V_0_rel=V_r, V_th_rel=V_th,
@@ -171,7 +205,8 @@ def working_point(net_dict, rates):
     nu.index = nu.index.set_names(N.index.names)
     nu = nu.reindex(N.index).astype(float).fillna(0.0)
 
-    mu = pd.Series(_mean_input(nu=nu, **input_prms), index=N.index)
+    mu = pd.Series(_mean_input(nu=nu, **input_prms) + p['mu_dc'],
+                   index=N.index)
     sigma = pd.Series(_std_input(nu=nu, **input_prms), index=N.index)
     wp = (V_th - mu) / sigma.replace(0, np.nan)
     return pd.DataFrame({'mu': mu, 'sigma': sigma, 'working_point': wp})
@@ -246,8 +281,14 @@ def oscillation_spectrum(net_dict, rates, freqs=None,
     nu.index = nu.index.set_names(N.index.names)
     nu = nu.reindex(N.index).astype(float).fillna(0.0).values
 
-    # working point in SI units (V, s); tau_m and tau_s are uniform ⇒ scalars
-    mu_V = _mean_input(nu=nu, **input_prms) * 1e-3
+    # working point in SI units (V, s). nnmt's transfer function takes one
+    # tau_m and one tau_s, so both have to be uniform across the network.
+    for name, values in (('tau_m', p['tau_m'].values),
+                         ('tau_syn', p['tau_syn'].values)):
+        if not np.allclose(values, values.flat[0]):
+            raise ValueError('oscillation_spectrum needs one {} for the whole '
+                             'network; got {}'.format(name, np.unique(values)))
+    mu_V = (_mean_input(nu=nu, **input_prms) + p['mu_dc']) * 1e-3
     sig_V = _std_input(nu=nu, **input_prms) * 1e-3
     V_th_V, V_0_V = p['V_th'].values * 1e-3, p['V_r'].values * 1e-3
     J_V = input_prms['J'].values * 1e-3

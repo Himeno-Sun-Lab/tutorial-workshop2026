@@ -28,13 +28,14 @@ remove the very effect under study.
 
 Three evaluation methods, cheapest first
 ----------------------------------------
-``analytic``  Closed-form mean drive.  For an iaf_psc_exp neuron the stationary
-              mean depolarisation is
-                  dV = (tau_m/C_m) * (w_ext*tau_syn*K_ext*nu_ext + I_e)
-              and it is *affine* in eta_ext (nu_ext is proportional to it, and
-              so is the external part of I_e).  Two network builds therefore
-              determine dV(eta) exactly, and the eta that restores any target
-              fraction of threshold follows in closed form.  No simulation.
+``analytic``  Closed-form mean input.  At the full-scale rates the downscaled
+              network gives a neuron the full-scale mean input - external,
+              recurrent and DC together (see ``mean_drive``) - and it is
+              *affine* in eta_ext (nu_ext is proportional to it, and so is the
+              external part of I_e; the recurrent part is fixed by the rates
+              file).  Two network builds therefore determine dV(eta) exactly,
+              and the eta that puts it at any target fraction of threshold
+              follows in closed form.  No simulation.
               Cost: ~2 network builds.  Does NOT predict firing rates.
 
 ``theory``    Mean-field (NNMT) self-consistent rates, with the compensating DC
@@ -285,26 +286,46 @@ class NetworkFactory:
 #  Method 1: closed-form mean drive
 # --------------------------------------------------------------------------- #
 def mean_drive(net_dict, pop):
-    """Stationary mean depolarisation of ``pop`` and its distance to threshold.
+    """Mean depolarisation of ``pop`` at the full-scale rates, and its distance to threshold.
 
-    Returns (dV_mV, to_threshold_mV).  For iaf_psc_exp with current-based
-    exponential synapses the mean input is
-        dV = (tau_m/C_m) * (w_ext * tau_syn * K_ext * nu_ext * 1e-3 + I_e)
-    with nu_ext in Hz, w_ext and I_e in pA, tau in ms, C_m in pF.
+    Returns (dV_mV, to_threshold_mV).  When every population fires at the
+    full-scale rates nu_hat (``net_dict["fullscale_rates"]``), a neuron of the
+    downscaled network receives - external, recurrent and DC input together -
+    the mean input of the full-scale network:
+        dV = (tau_m/C_m) * 1e-3 * (w_ext*tau_syn_ex*K_ext*nu_ext
+                                   + p_transmit * sum_j K_j*w_j*tau_syn_j*nu_hat_j)
+             + (tau_m/C_m) * I_e
+    with rates in Hz, weights and I_e in pA, tau in ms, C_m in pF. Sources
+    emptied by downscaling are left out of the sum; I_e stands in for them.
+    Without full-scale rates (an unscaled network) the recurrent term is left
+    out and dV is the external drive alone.
     """
     kind = pop[-1]
     npar = net_dict[f"neuron_params_{kind}"]
-    tau_m, C_m, tau_syn = npar["tau_m"], npar["C_m"], npar["tau_syn_ex"]
+    tau_m, C_m = npar["tau_m"], npar["C_m"]
 
-    n = net_dict["neuron_numbers"].loc[pop]
+    N = net_dict["neuron_numbers"]
+    n = N.loc[pop]
     if n <= 0:
         raise ValueError(f"population {pop} is empty")
     k_ext = net_dict["synapses_external"].loc[pop] / n
     w_ext = net_dict["weights_ext"].loc[pop]
     nu_ext = net_dict["rate_ext"].loc[pop]
     i_dc = net_dict["dc_drive"].loc[pop]
+    mu = w_ext * npar["tau_syn_ex"] * k_ext * nu_ext * 1e-3
 
-    dv = (tau_m / C_m) * (w_ext * tau_syn * k_ext * nu_ext * 1e-3 + i_dc)
+    if net_dict.get("fullscale_rates"):
+        nu_hat = pd.read_pickle(net_dict["fullscale_rates"])
+        sources = N.index[N > 0]
+        k = net_dict["synapses_internal"].loc[pop, sources] / n
+        w = net_dict["weights"].loc[pop, sources]
+        tau_syn = pd.Series(
+            [npar["tau_syn_ex"] if s[-1] == "E" else npar["tau_syn_in"] for s in sources],
+            index=sources)
+        nu = nu_hat.reindex(sources).fillna(0.0)
+        mu += 1e-3 * net_dict.get("p_transmit", 1.0) * float((k * w * tau_syn * nu).sum())
+
+    dv = (tau_m / C_m) * (mu + i_dc)
     return float(dv), float(npar["V_th"] - npar["E_L"])
 
 
@@ -332,9 +353,9 @@ def analytic_eta(factory, pop, target_fraction, eta_a=1.1, eta_b=3.0):
 def theory_rates(net_dict, t_max=60.0, nu0=1.0):
     """Self-consistent NNMT mean-field rates including ``dc_drive``.
 
-    ``src/theory/rates.py`` builds the mean input without the DC compensation,
-    which is exactly the term that keeps a downscaled network alive, so the DC
-    contribution (tau_m * I_e / C_m, in mV) is added here.
+    The DC compensation is exactly the term that keeps a downscaled network
+    alive; ``src/theory/rates.py`` returns its contribution (tau_m * I_e / C_m,
+    in mV) as ``mu_dc``, which nnmt's mean input does not contain.
     """
     from scipy.integrate import solve_ivp
     from nnmt.lif.exp import _firing_rate_shift
@@ -345,12 +366,7 @@ def theory_rates(net_dict, t_max=60.0, nu0=1.0):
     index = p["N"].index
     tau_m, t_ref, v_th, v_r = p["tau_m"], p["t_ref"], p["V_th"], p["V_r"]
     prm, prm_scaled = p["input_prms"], p["input_prms_scld"]
-
-    c_m = pd.Series(0.0, index=index)
-    c_m.loc[(slice(None), slice(None), "E")] = net_dict["neuron_params_E"]["C_m"]
-    c_m.loc[(slice(None), slice(None), "I")] = net_dict["neuron_params_I"]["C_m"]
-    dc = net_dict["dc_drive"].sort_index().reindex(index).fillna(0.0)
-    mu_dc = ((tau_m * 1e3) * dc / c_m).values          # tau_m is in s -> ms
+    mu_dc = p["mu_dc"]
 
     def ode(_, nu):
         mu = _mean_input(nu=nu, **prm) + mu_dc
@@ -381,9 +397,8 @@ def theory_rates(net_dict, t_max=60.0, nu0=1.0):
 def read_population_rates(sim_folder, t_start, t_stop):
     """Population firing rates straight from the NEST ASCII output.
 
-    Deliberately bypasses ``Analysis``: that class caches ``rates.pkl`` with the
-    first ``t_start`` it ever sees, which silently returns stale numbers inside
-    a search loop.
+    Deliberately bypasses ``Analysis``: a search loop needs the rates of a
+    window it chooses itself, not a whole analysis stage with its figures.
     """
     sim_folder = Path(sim_folder)
     gid_file = sim_folder / "population_GIDs.dat"
@@ -509,7 +524,7 @@ class Evaluator:
         self._cache[key] = result
 
         flag = "alive" if result["alive"] else "SILENT"
-        print(f"  eta={key:6.3f} | drive {100*dv/thr:5.1f}% of threshold | "
+        print(f"  eta={key:6.3f} | mean input {100*dv/thr:5.1f}% of threshold | "
               f"E {result['E']:6.3f} Hz | I {result['I']:6.3f} Hz | "
               f"{flag:6s} | {elapsed:5.1f} s", flush=True)
         return result
@@ -636,7 +651,8 @@ def parse_args(argv=None):
                         "(default: the lower edge of --target-e; pass the band "
                         "midpoint for a result less sensitive to seed noise)")
     g.add_argument("--target-fraction", type=float, default=1.1,
-                   help="external + DC drive relative to threshold that "
+                   help="mean input at the full-scale rates (external + "
+                        "recurrent + DC) relative to threshold that "
                         "--method analytic solves for")
     g.add_argument("--iterations", type=int, default=6,
                    help="bisection steps per boundary")
@@ -708,11 +724,11 @@ def main(argv=None):
 
     # ---- the closed-form estimate is always reported: it is nearly free ----
     ana = analytic_eta(factory, args.probe_pop, args.target_fraction)
-    print(f"analytic mean drive for {args.probe_pop}:")
+    print(f"analytic mean input at the full-scale rates, {args.probe_pop}:")
     print(f"  dV(eta) = {ana['slope_mV_per_eta']:.3f} * eta "
           f"{ana['intercept_mV']:+.3f} mV,   threshold at "
           f"{ana['to_threshold_mV']:.1f} mV")
-    print(f"  at the repository default eta_ext = 1.1 the drive reaches "
+    print(f"  at the repository default eta_ext = 1.1 the mean input reaches "
           f"{100 * ana['fraction_at_1p1']:.0f}% of threshold")
     print(f"  eta_ext reaching {args.target_fraction:.2f} x threshold: "
           f"{ana['eta']:.3f}")
@@ -854,7 +870,7 @@ def finish(args, evaluate, results, summary):
         show = results[["eta", "drive_fraction", "E", "E_sd", "I", "I_sd",
                         "alive"]].copy()
         show["drive_fraction"] = (100 * show.drive_fraction).round(1)
-        show = show.rename(columns={"drive_fraction": "drive_%"})
+        show = show.rename(columns={"drive_fraction": "input_%"})
         print(show.to_string(index=False,
                              float_format=lambda v: f"{v:.3f}"))
     best = summary.get("best")
@@ -863,7 +879,7 @@ def finish(args, evaluate, results, summary):
                else "closest to the target, but OUTSIDE at least one band")
         print(f"\nrecommended eta_ext = {best['eta']:.3f}   ({tag})")
         print(f"   mean rates: E {best['E']:.2f} Hz, I {best['I']:.2f} Hz   "
-              f"mean drive {100 * best['drive_fraction']:.0f}% of threshold")
+              f"mean input {100 * best['drive_fraction']:.0f}% of threshold")
     if summary.get("eta_alive") is not None:
         print(f"   network stops being silent at eta_ext ~ "
               f"{summary['eta_alive']:.3f}")
