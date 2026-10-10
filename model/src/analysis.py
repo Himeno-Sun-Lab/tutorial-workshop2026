@@ -1420,6 +1420,67 @@ class Analysis():
                              corr.shape[0], corr.shape[1])
         return corr
 
+    def _bandCoherence(self, signals, fs, cfg_key):
+        """
+        Pairwise magnitude-squared coherence, averaged over [fmin, fmax].
+
+        Welch PSDs and cross-spectral densities share one segment length,
+        ``ana_dict[cfg_key]['nperseg']`` samples; None takes 500 ms segments,
+        i.e. a resolution of 2 Hz whatever the sampling rate.  (scipy's default
+        of 256 samples is 25.6 ms at 0.1 ms resolution: 39 Hz bins, of which
+        only 39, 78 and 117 Hz fall into a 0-120 Hz band.)
+
+        Parameters
+        ----------
+        signals : ndarray, shape (N, n_t)
+        fs : float
+            Sampling frequency in Hz.
+        cfg_key : str
+            Entry of ``ana_dict`` holding ``fmin``, ``fmax`` and ``nperseg``.
+
+        Returns
+        -------
+        coh_matrix : ndarray, shape (N, N)
+            Ones on the diagonal.
+        """
+        cfg  = self.ana_dict[cfg_key]
+        fmin = cfg['fmin']
+        fmax = cfg['fmax']
+        n_t  = signals.shape[1]
+        nperseg = cfg.get('nperseg')
+        if nperseg is None:
+            nperseg = int(round(0.5 * fs))  # 500 ms
+        nperseg = min(int(nperseg), n_t)
+
+        # Pre-compute Welch PSD for every signal once, reuse per pair
+        f_ref, _ = welch(signals[0], fs=fs, nperseg=nperseg)
+        band = (f_ref >= fmin) & (f_ref <= fmax)
+        if self.logger:
+            self.logger.info(
+                '%s: nperseg=%d (%.0f ms), df=%.2f Hz, %d bins in [%g, %g] Hz '
+                '(%.1f-%.1f Hz), %d segments', cfg_key, nperseg,
+                1000. * nperseg / fs, fs / nperseg, band.sum(), fmin, fmax,
+                f_ref[band].min() if band.any() else np.nan,
+                f_ref[band].max() if band.any() else np.nan,
+                max(1, (n_t - nperseg // 2) // (nperseg - nperseg // 2)))
+            if fmax > fs / 2:
+                self.logger.warning('%s: fmax=%g Hz lies above the Nyquist '
+                                    'frequency %g Hz', cfg_key, fmax, fs / 2)
+            if band.sum() < 2:
+                self.logger.warning('%s: only %d frequency bin(s) in the band; '
+                                    'lower nperseg or widen [fmin, fmax]',
+                                    cfg_key, band.sum())
+        psds = [welch(s, fs=fs, nperseg=nperseg)[1] for s in signals]
+
+        N = len(signals)
+        coh_matrix = np.ones((N, N))
+        for i in range(N):
+            for j in range(i + 1, N):
+                _, Pxy = csd(signals[i], signals[j], fs=fs, nperseg=nperseg)
+                Cxy = np.abs(Pxy[band]) ** 2 / (psds[i][band] * psds[j][band])
+                coh_matrix[i, j] = coh_matrix[j, i] = Cxy.mean()
+        return coh_matrix
+
     @timeit
     def calcAreaLfpCoherence(self):
         """
@@ -1453,8 +1514,6 @@ class Analysis():
             roi = self.calcAreaLfp()
 
         tmin = self.ana_dict['calcAreaLfpCoherence']['tmin']
-        fmin = self.ana_dict['calcAreaLfpCoherence']['fmin']
-        fmax = self.ana_dict['calcAreaLfpCoherence']['fmax']
 
         z = roi.loc[:, roi.columns >= tmin]
 
@@ -1468,21 +1527,8 @@ class Analysis():
         dt = z.columns.values[1] - z.columns.values[0]   # ms
         fs = 1000. / dt                                    # Hz
 
-        areas   = z.index.tolist()
-        signals = z.values        # (N, n_t)
-        N       = len(areas)
-
-        # Pre-compute Welch PSD for every area once, reuse per pair
-        f_ref, _ = welch(signals[0], fs=fs)
-        band = (f_ref >= fmin) & (f_ref <= fmax)
-        psds = [welch(s, fs=fs)[1] for s in signals]
-
-        coh_matrix = np.ones((N, N))
-        for i in range(N):
-            for j in range(i + 1, N):
-                _, Pxy = csd(signals[i], signals[j], fs=fs)
-                Cxy = np.abs(Pxy[band]) ** 2 / (psds[i][band] * psds[j][band])
-                coh_matrix[i, j] = coh_matrix[j, i] = Cxy.mean()
+        areas      = z.index.tolist()
+        coh_matrix = self._bandCoherence(z.values, fs, 'calcAreaLfpCoherence')
 
         coherence = pd.DataFrame(coh_matrix, index=areas, columns=areas)
         coherence.to_pickle(os.path.join(self.ana_folder, 'lfp_area_coherence.pkl'))
@@ -1529,8 +1575,6 @@ class Analysis():
                     self.logger.error(msg)
                 raise FileNotFoundError(msg)
         tmin = self.ana_dict['calcLfpCoherence']['tmin']
-        fmin = self.ana_dict['calcLfpCoherence']['fmin']
-        fmax = self.ana_dict['calcLfpCoherence']['fmax']
 
         z = self.lfp.loc[:, self.lfp.columns >= tmin]
         dt = z.columns.values[1] - z.columns.values[0]   # ms
@@ -1539,21 +1583,9 @@ class Analysis():
         # Each row is one (area, layer) signal; index order is area-first
         # (preserved from groupby in calc_lfp_proxy / calc_lfp_proxy_kernel)
         index_pairs = list(z.index)   # [(area, layer), ...]
-        signals     = z.values        # (N, n_t)
-        N           = len(index_pairs)
-
-        # Pre-compute Welch PSD for every signal once
-        f_ref, _ = welch(signals[0], fs=fs)
-        band = (f_ref >= fmin) & (f_ref <= fmax)
-        psds = [welch(s, fs=fs)[1] for s in signals]
 
         # Full N×N coherence — includes both same-layer and cross-layer pairs
-        coh_matrix = np.ones((N, N))
-        for i in range(N):
-            for j in range(i + 1, N):
-                _, Pxy = csd(signals[i], signals[j], fs=fs)
-                Cxy = np.abs(Pxy[band]) ** 2 / (psds[i][band] * psds[j][band])
-                coh_matrix[i, j] = coh_matrix[j, i] = Cxy.mean()
+        coh_matrix = self._bandCoherence(z.values, fs, 'calcLfpCoherence')
 
         mi = pd.MultiIndex.from_tuples(index_pairs, names=['area', 'layer'])
         result = pd.DataFrame(coh_matrix, index=mi, columns=mi)
