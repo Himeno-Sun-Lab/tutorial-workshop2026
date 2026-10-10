@@ -1,8 +1,8 @@
 # Environment for the tutorial.
 #
-#   mamba env create -f environment.yml          # or: conda env create -f ...
-#   mamba activate nest38
-#   python -m ipykernel install --user --name nest38 --display-name "Python (NEST 3.8)"
+#   mamba env create -f environment.yaml         # or: conda env create -f ...
+#   mamba activate nest3.8
+#   python -m ipykernel install --user --name nest3.8 --display-name "nest3.8"
 #
 # Then verify NEST before anything else:
 #   python -c "import nest; print(nest.__version__)"      # expect 3.8.0
@@ -43,6 +43,7 @@ dependencies:
       # Mean-field theory, used by tools/eta_ext_search.py --method theory.
       - nnmt==1.3.0
 
-# Optional, and not worth the solve time unless you want it: a workflow manager
-# to drive the three pipeline stages instead of calling them yourself.
+# Needed only on the server that computes the full-scale runs, where Snakemake
+# drives the three pipeline stages and reuses the ones already done. The notebook
+# does not use it: laptop runs always start from scratch.
 #   mamba install -c conda-forge -c bioconda snakemake
