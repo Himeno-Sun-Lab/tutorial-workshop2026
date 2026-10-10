@@ -7,8 +7,9 @@ notebook and the three pipeline stages:
 * where the tutorial, the bundled model and the results live,
 * how a run is started (``subprocess`` into ``model/src/snakemake_*.py``),
 * how the hash files a run writes are turned into the directory it wrote to,
-* how a figure or a result file of a finished run is loaded - a laptop run, or
-  a full-scale run imported from the server it was computed on.
+* how a figure or a result file of a finished run is loaded - a laptop run, a
+  full-scale run imported from the server it was computed on, or a figure
+  shipped with the tutorial.
 
 **No reuse on the laptop.**  Every ``run_all()`` starts from an empty
 ``results/<run>/`` and runs all of its stages again: nothing is skipped because
@@ -26,9 +27,21 @@ Layout of one laptop run::
     results/<run>/log/<stage>.log
     results/<run>/<net_hash>/<sim_hash>/<ana_hash>/plots/ ...
 
-A full-scale run is imported unchanged, in the layout the server's Snakemake
-workflow wrote it - nothing is converted, so the hashes still name the
-directories they were computed for::
+**Full-scale runs come in two forms.**
+
+*Distributed: figures.*  The runs themselves are patient-derived and 2-3.5 GB
+each, so they are not part of the tutorial.  What is shipped are figures
+rendered from them, with the numbers the notebook text quotes::
+
+    figures/fullscale/<run>/*.png                      one file per figure
+    figures/fullscale/<run>/numbers.json               the quoted numbers
+
+``show_figure("fullscale/<run>/<name>.png")`` displays one of them; this is what
+the notebook's Part 6.2 uses, and it needs nothing but the repository.
+
+*Local: the runs.*  On a machine that holds them, a run is imported unchanged,
+in the layout the server's Snakemake workflow wrote it - nothing is converted,
+so the hashes still name the directories they were computed for::
 
     fullscale/experiments/<run>.py                     the experiment file
     fullscale/experiments/<run>.{network,simulation,analysis}_hash
@@ -38,8 +51,13 @@ directories they were computed for::
                                                        compared against, under
                                                        its server path
 
-Every reader below - ``show``, ``rates``, ``load_result``, ``area_mean_rate`` -
-accepts its name in place of a laptop run.  The notebook only reads it.
+``has_fullscale(run)`` tells whether it is there.  Every reader below - ``show``,
+``rates``, ``load_result``, ``area_mean_rate``, ``sim_dir`` - then accepts its
+name in place of a laptop run, and ``fullscale_info`` / ``fullscale_fc`` add its
+provenance and its FC matrices.  ``tools/make_fullscale_figures.py`` uses them
+to render ``figures/fullscale/`` from these runs; re-run it, and commit its
+output, whenever a run or a figure changes.  ``fullscale/`` itself is
+gitignored and is only ever read.
 
 The notebook imports from here so that its cells show the *model* - parameters,
 rates, pathology - rather than path juggling.  Everything is importable outside
@@ -375,6 +393,24 @@ def show(run, name, width=900):
     path = run_dir(run) / "plots" / name
     if not path.exists():
         print(f"not found: {name}")
+        return
+    display(Image(filename=str(path), width=width))
+
+
+FIGURES = TUTORIAL / "figures"
+
+
+def show_figure(name, width=900):
+    """Display a figure shipped with the tutorial, ``figures/<name>``.
+
+    The full-scale run is not distributed (it is patient-derived and ~2 GB), so
+    its figures are rendered in advance by ``tools/make_fullscale_figures.py``.
+    """
+    from IPython.display import Image, display
+
+    path = FIGURES / name
+    if not path.exists():
+        print(f"not found: figures/{name}")
         return
     display(Image(filename=str(path), width=width))
 
