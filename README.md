@@ -49,10 +49,11 @@ Keep these when you change anything; the notebook text relies on them.
 - **No reuse on the laptop.** `run_all(experiment)` deletes `results/<run>/`, writes a driver
   `results/<run>/experiment.py` that points the output there, and runs all three stages. Reuse of
   finished stages exists only in the server's Snakemake workflow (notebook 6.1).
-- **Overrides are merged by `helpers/snakemake.py:nested_dict_update`.** It is type-strict (an
-  `int` where the default is a `float` raises `TypeError`), it *replaces* `neuron_params_X` /
-  `neuron_param_dist_X` as a whole, and it silently ignores a dict given for a key whose default is
-  not a dict. Custom neuron types (`neuron_types`) instead inherit every parameter they leave out.
+- **Overrides are merged by `helpers/snakemake.py:nested_dict_update`.** A value must have the
+  type of the default it replaces - `int` and `float` are interchangeable when no information is
+  lost, a dict for a default that is not a dict raises `TypeError` - and a key whose default is
+  missing or `None` takes any value. It *replaces* `neuron_params_X` / `neuron_param_dist_X` as a
+  whole; custom neuron types (`neuron_types`) instead inherit every parameter they leave out.
 - **`tutorial_amyloid.py` differs from `tutorial_CN.py` only in its neuron type and its own
   full-scale rates.** It reads `eta_ext` and `t_sim` from `tutorial_CN.py` so the two cannot drift
   apart; recalibrate the healthy experiment, never the pathological one.
@@ -69,8 +70,8 @@ python -m ipykernel install --user --name nest3.8 --display-name "nest3.8"
 
 The notebook's metadata names the kernel `nest3.8`. Everything that imports NEST - the three
 stages, both calibration tools, executing the notebook - must run in this environment. Keep
-**pandas below 3**: under copy-on-write `DataFrame.values` is read-only, and
-`data_preprocessing/connectivity.py` writes into it (`np.fill_diagonal(relSynapses.values, ...)`).
+**pandas 2.2**, the pinned version: network construction also runs under pandas 3 (same network
+hashes), the rest of the pipeline has not been tested there.
 
 Hardware the participants are told about (notebook 0.3, 2.2): 4+ cores, 8 GB RAM minimum,
 16 GB recommended, ~8 GB free disk; macOS, Linux, or WSL2 on Windows (NEST has no native Windows
@@ -237,10 +238,15 @@ Commit `de56fac` (base version, 2026-09-18) holds the model as it was copied in;
 - **Downscaling** (`network.py`): the DC compensation uses the full-scale mean input computed from
   `fullscale_rates`, with the receiving neuron's synaptic time constants and the realised
   (rounded) in-degrees.
-- **Analysis** (`analysis.py`): kernel and NEST-current LFP proxies, area-level LFP, band-averaged
-  coherence (500 ms Welch segments, 0.01-80 Hz by default), n:m theta-beta PLV, FC scored against
-  the reference `ana_params["experimental_fc"]` selects (group data or one subject), NaN-safe
-  correlations, neuron-type rasters, per-category plot folders.
+- **Analysis** (`analysis.py`): kernel and NEST-current LFP proxies (the Mazzoni et al. 2015
+  reference weighted sum on the excitatory populations), area-level LFP, band-averaged coherence
+  (500 ms Welch segments, 0.01-80 Hz by default), n:m theta-beta PLV, FC scored against the
+  reference `ana_params["experimental_fc"]` selects (group data or one subject), NaN-safe
+  correlations, neuron-type rasters, per-category plot folders. Results that depend on analysis
+  parameters are cached per analysis (`<ana_hash>/`), only simulation-level files next to the
+  spikes; per-neuron statistics include the neurons that never fired.
+- **Theory** (`theory/rates.py`): the mean input includes the DC current and `p_transmit`.
+- **Simulation** (`simulation.py`): optional `sim_params["external_weight_sd"]` (section 8).
 - **Defaults** (`default_*_params.py`): long-range gains 2.5 / 5.0; `neuron_types`; coherence
   defaults.
 - **Removed**: the paper-figure scripts (`figure_*.py`), `snakemake_archive.py`, the Abeta
@@ -249,58 +255,35 @@ Commit `de56fac` (base version, 2026-09-18) holds the model as it was copied in;
 
 ## 8. Known issues
 
-Found in a code review and not fixed. None of them changes the committed notebook outputs unless
-noted.
+What a code review found and is still open. The defects it found are fixed (the history from
+`92cd3da` on); the points below are properties of the model or limitations to keep in mind.
 
-**Affect results or their interpretation**
-
-- *Stale analysis caches.* `Analysis` caches `rates.pkl`, `rates_individual.pkl`, `cv_isi.pkl`,
-  `lv.pkl`, `cc.pkl`, `bold_correlation.pkl` and `spikes_per_neuron_*.pkl` in the **simulation**
-  folder, although they depend on analysis parameters (`t_start`, `tmin`, bins). A second analysis of
-  the same simulation with other windows reads the first one's values. Harmless on the laptop
-  (`run_all` starts empty); wrong when Snakemake reuses a simulation.
 - *Downscaled working point.* In `tutorial_CN` 66 of 254 populations, and the excitatory
-  populations of several whole areas, are silent - a property of the calibrated downscaled network,
-  which the notebook no longer flags as an error.
+  populations of several whole areas, are silent; 57 % of all neurons never fire in the 4 s run.
+  This is the calibrated downscaled network, not an analysis artefact; the per-neuron statistics
+  count these neurons as zeros.
 - *Amyloid vs CN is not a clean comparison when downscaled.* Each experiment's DC current comes from
   its own full-scale rates, so the two runs differ in more than the neuron substitution (B.5).
-- *External drive heterogeneity.* `Simulation.connect_poisson` connects one Poisson generator per
-  population `all_to_all`, so each neuron's whole external input carries a single random weight:
-  the mean external drive varies by `PSP_rel` (10 %) from neuron to neuron, ~12.5 mV at
-  `eta_ext` 5.
-- *Mean-field theory ignores the DC current.* `theory/rates.py:_build_inputs` (used by
-  `working_point`, `oscillation_spectrum`) has no `dc_drive`, no neuron types and no `p_transmit`;
-  on a downscaled network it misses ~70 % of the mean input. `oscillation_spectrum` also assumes one
-  `tau_m` and takes the largest `tau_s`. Not called anywhere at present; `eta_ext_search.py`'s
-  `theory` method adds the DC itself.
-- *Analytic drive estimate.* `eta_ext_search.py:mean_drive` reports external input plus DC current,
-  i.e. the full external input plus `(1 - sqrt(k))` of the full recurrent input - a hybrid that is
-  neither the external drive nor the total mean input ("drive / threshold" in `eta_search()`).
-- *LFP proxy.* The Mazzoni et al. (2015) reference weighted sum is defined on pyramidal-cell
-  currents; `_kernelLayerCurrent` and `calc_lfp_proxy` sum over excitatory and inhibitory
-  populations.
-- *Silent neurons dropped.* The spike reader keeps only neurons that fired, so individual-rate
-  distributions and the rate-distribution KS test exclude silent neurons.
-
-**Latent: correct with the current parameters, wrong if they change**
-
-- `calc_rates` ignores `rate_histogram.t_start` (always bins from 0), and `computeBOLD` takes the
-  time axis as one sample per ms - wrong for `rate_histogram.binsize` != 1 ms.
-- `pipeline.fullscale_fc` slices the empirical BOLD as `[:, 34:68, 0]`; the analysis stage itself
-  also accepts 84-node files, several participants and correlation matrices.
-- In `neuron_types` nested dicts an unlisted layer falls back to the area's own `"default"`, not
-  to the top-level one: `{"default": 0.02, "precuneus": {"V": 0.2}}` gives precuneus II/III 0.
-
-**Robustness**
-
-- `analysisDictFromDump` calls `yaml.load` without `Loader` (TypeError with PyYAML >= 6).
-- `pipeline.run_stage` launches `"python"` from `PATH`, not `sys.executable`; from a kernel whose
-  environment is not first on `PATH` the stages run without NEST.
-- `Simulation`: the `pairwise_bernoulli` branch leaves `conn_dict_rec` undefined on a missing
-  `sigma_x`; `getHash` drops string-keyed `stimuli` and rewrites `sim_dict`; `rec_V_int` is never
-  passed to the multimeters; `connect_single_spike` passes a list where NEST expects a
-  NodeCollection.
-- `nested_dict_update`: see section 2.
+- *External drive heterogeneity.* Each neuron receives its external input through one connection
+  with one random weight. With the default `sim_params["external_weight_sd"] = "per_neuron"` the
+  mean external drive differs by `PSP_rel` (10 %) between neurons, ~12.5 mV at `eta_ext` 5;
+  `"per_synapse"` gives the spread of `K_ext` independent synapses (s.d. / sqrt(K_ext)). The
+  calibration of section 4 holds for the default only: switching needs 5.1 and 5.2.
+- *Mean-field theory.* `theory/rates.py` includes the DC current and `p_transmit`, but uses the
+  base neuron parameters for every population: custom neuron types are not modelled (a warning names
+  them). `oscillation_spectrum` needs one `tau_m` and one `tau_s` for the whole network.
+- *LFP proxy.* The reference weighted sum (Mazzoni et al. 2015) is implemented as published - input
+  onto excitatory populations, AMPA(t - 6 ms) - 1.65 GABA(t) with GABA negative - but its delay and
+  weight were fitted to the network and morphology of that paper; here they are an assumption. The
+  kernel method has no external input (a constant-rate drive, which drops out in the z-score).
+- *Notebook outputs.* The fixes from `92cd3da` to `378a572` change no simulated number, but they
+  change analysis outputs: the LFP proxy (its sign flipped - correlation -0.98 with the old one;
+  spectra, coherence and the 3:1 PLV are nearly unchanged), the per-neuron rate distributions
+  (silent neurons included) and the FC figure (window from `plotConnectivities.tmin`). Re-run the
+  notebook (5.2) before distributing it.
+- *Old analysis caches.* Analyses made before `3fc14d9` cached their analysis-dependent results in
+  the simulation folder. The readers in `tools/pipeline.py` fall back to that location, which is
+  right for the imported full-scale runs but would pick up a stale file of an old laptop run.
 
 ## 9. Reference
 
