@@ -175,7 +175,11 @@ class NetworkFactory:
         self.logger = logger
         self._cache: dict[float, Network] = {}
 
+        # The anatomy is built with the same overrides as every network below:
+        # Network takes its synapse numbers from SN, not from its params, so an
+        # individual connectome only takes effect if SN is built from it.
         base = deepcopy(default_net_params.params)
+        nested_dict_update(base, self.anatomy_overrides(), logger)
         t0 = time.time()
         print("building cytoarchitecture and connectome (one-off, ~60 s) ...",
               flush=True)
@@ -184,7 +188,18 @@ class NetworkFactory:
                                 **base["cytoarchitecture_params"])
         self.SN = SynapseNumbers(NN=self.NN, logger=logger,
                                  **base["predictive_connectomic_params"])
+        print(f"  connectome: {base['predictive_connectomic_params']['con_path']}")
         print(f"  done in {time.time() - t0:.0f} s", flush=True)
+
+    def anatomy_overrides(self):
+        """Overrides that change the anatomy (NeuronNumbers / SynapseNumbers)."""
+        o = {}
+        if self.args.con_path is not None:
+            # An individual connectome replaces the group-average one; the file
+            # must have the same variable layout (C_L, C_R, Dist, DK_Names).
+            o["predictive_connectomic_params"] = {
+                "con_path": str(self.args.con_path)}
+        return o
 
     def overrides(self, eta):
         args = self.args
@@ -199,10 +214,8 @@ class NetworkFactory:
                                           "cc_scalingEtoI": args.cc_e_to_i},
             "input_params": {"eta_ext": float(eta)},
         }
-        if args.con_path is not None:
-            # An individual connectome replaces the group-average one; the file
-            # must have the same variable layout (C_L, C_R, Dist, DK_Names).
-            o["predictive_connectomic_params"] = {"con_path": str(args.con_path)}
+        # Recorded in the dumped parameters (and so the hash) as well
+        o.update(self.anatomy_overrides())
         return o
 
     def build(self, eta):
