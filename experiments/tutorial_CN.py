@@ -136,7 +136,6 @@ ana_params = {
 
     "meanFiringRate":          {"t_start": _TRANSIENT},
     "individualFiringRate":    {"t_start": _TRANSIENT},
-    "rate_histogram":          {"t_start": _TRANSIENT},
     "cv":                      {"t_start": _TRANSIENT},
     "lvr":                     {"t_start": _TRANSIENT},
     "correlation_coefficient": {"tmin": _TRANSIENT},
@@ -153,4 +152,5 @@ ana_params = {
     "plotLfpWaveletArea":      {"tmin": _TRANSIENT},
     "plotConnectivities":      {"tmin": _TRANSIENT},
     "plotBOLD":                {"tmin": _TRANSIENT},
+    "plotAllFiringRatesSummary": {"t_start": _TRANSIENT},
 }

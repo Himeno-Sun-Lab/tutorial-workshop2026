@@ -127,6 +127,23 @@ class Analysis():
         """
         return active_neuron_types(self.net_dict.get('neuron_types'))
 
+    def _withSilentNeurons(self, per_neuron):
+        """
+        Append a zero for every neuron that never fired.
+
+        ``self.spikes`` holds a spike train only for the neurons that fired at
+        least once; ``per_neuron`` (one array per population, one value per
+        spike train, same index as ``self.spikes``) is completed with zeros up
+        to the population size of ``popGids``.
+        """
+        pop_size = self.popGids['pop_size']
+        out = {}
+        for pop, values in per_neuron.items():
+            values = np.asarray(values, dtype=float)
+            n_silent = max(0, int(pop_size.loc[pop]) - len(values))
+            out[pop] = np.concatenate([values, np.zeros(n_silent)])
+        return pd.Series(out, dtype=object).reindex(per_neuron.index)
+
     def _populationParam(self, area, layer, pop, key):
         """
         Neuron parameter of a population, averaged over its neuron types.
@@ -340,7 +357,7 @@ class Analysis():
         rate : Series
         """
         try:
-            rate = pd.read_pickle(os.path.join(self.sim_folder, 'rates.pkl'))
+            rate = pd.read_pickle(os.path.join(self.ana_folder, 'rates.pkl'))
         except FileNotFoundError:
             # Start, End and Simulation time
             t_start = self.ana_dict['meanFiringRate']['t_start']  # in ms
@@ -357,7 +374,7 @@ class Analysis():
             rate = self.spikes.apply(
                     lambda sts: sum([st[(st >= t_start) & (st < t_stop)].size for st in sts])
                     ).div(self.popGids['pop_size']) / t_sim_sec
-            rate.to_pickle(os.path.join(self.sim_folder, 'rates.pkl'))
+            rate.to_pickle(os.path.join(self.ana_folder, 'rates.pkl'))
         return rate
 
     @timeit
@@ -370,7 +387,7 @@ class Analysis():
         rate : Series
         """
         try:
-            rate = pd.read_pickle(os.path.join(self.sim_folder, 'rates_individual.pkl'))
+            rate = pd.read_pickle(os.path.join(self.ana_folder, 'rates_individual.pkl'))
         except FileNotFoundError:
             # Start, End and Simulation time
             t_start = self.ana_dict['individualFiringRate']['t_start']  # in ms
@@ -382,11 +399,13 @@ class Analysis():
             t_sim_sec = (t_stop - t_start) / 1000.  # Convert ms to s
             # For all neurons we count all spikes that have been emitted
             # during the simulation. Then we divide the total number of spikes
-            # by the simulation time.
-            rate = self.spikes.apply(
-                    lambda sts: np.array([st[(st >= t_start) & (st < t_stop)].size for st in sts])
-                    ) / t_sim_sec
-            rate.to_pickle(os.path.join(self.sim_folder, 'rates_individual.pkl'))
+            # by the simulation time. Neurons that never fired have no spike
+            # train and count as rate 0.
+            rate = self._withSilentNeurons(self.spikes.apply(
+                    lambda sts: np.array([st[(st >= t_start) & (st < t_stop)].size for st in sts],
+                                         dtype=float)
+                    )) / t_sim_sec
+            rate.to_pickle(os.path.join(self.ana_folder, 'rates_individual.pkl'))
         return rate
 
     @timeit
@@ -401,8 +420,8 @@ class Analysis():
         spikes_per_neuron_area_resolved : Series
         """
         try:
-            spikes_per_neuron_population_resolved = pd.read_pickle(os.path.join(self.sim_folder, 'spikes_per_neuron_population_resolved.pkl'))
-            spikes_per_neuron_area_resolved = pd.read_pickle(os.path.join(self.sim_folder, 'spikes_per_neuron_area_resolved.pkl'))
+            spikes_per_neuron_population_resolved = pd.read_pickle(os.path.join(self.ana_folder, 'spikes_per_neuron_population_resolved.pkl'))
+            spikes_per_neuron_area_resolved = pd.read_pickle(os.path.join(self.ana_folder, 'spikes_per_neuron_area_resolved.pkl'))
         except FileNotFoundError:
             # Simulation time in seconds
             bins = self.ana_dict['binned_spikerates_per_neuron']['bins']
@@ -410,12 +429,15 @@ class Analysis():
             # during the simulation. Then we divide the total number of spikes
             # per population by the number of neurons in this populations and
             # the simulation time.
-            spikes_per_neuron_population_resolved_tmp = self.spikes.apply(
-                    lambda tmp: np.histogram(np.array([len(i) for i in tmp]), bins=bins)
+            # Spike count of every neuron, those that never fired included
+            counts = self._withSilentNeurons(self.spikes.apply(
+                    lambda sts: np.array([len(st) for st in sts], dtype=float)))
+            spikes_per_neuron_population_resolved_tmp = counts.apply(
+                    lambda c: np.histogram(c, bins=bins)
                     )
-            spikes_per_neuron_area_resolved_tmp = self.spikes.apply(list).groupby('area').agg(sum).apply(
-                    lambda tmp: np.histogram(np.array([len(i) for i in tmp]), bins=bins)
-                    )
+            spikes_per_neuron_area_resolved_tmp = counts.groupby('area').agg(
+                    lambda cs: np.concatenate(list(cs))
+                    ).apply(lambda c: np.histogram(c, bins=bins))
 
             tmp = {}
             for area, (hist, bin_edges) in spikes_per_neuron_population_resolved_tmp.items():
@@ -429,8 +451,8 @@ class Analysis():
                 tmp[(area, 'bin_edges')] = bin_edges
             spikes_per_neuron_area_resolved = pd.Series(tmp)
 
-            spikes_per_neuron_population_resolved.to_pickle(os.path.join(self.sim_folder, 'spikes_per_neuron_population_resolved.pkl'))
-            spikes_per_neuron_area_resolved.to_pickle(os.path.join(self.sim_folder, 'spikes_per_neuron_area_resolved.pkl'))
+            spikes_per_neuron_population_resolved.to_pickle(os.path.join(self.ana_folder, 'spikes_per_neuron_population_resolved.pkl'))
+            spikes_per_neuron_area_resolved.to_pickle(os.path.join(self.ana_folder, 'spikes_per_neuron_area_resolved.pkl'))
         return spikes_per_neuron_population_resolved, spikes_per_neuron_area_resolved
 
     @timeit
@@ -521,7 +543,7 @@ class Analysis():
         """
 
         # Calculate the time-averaged firing rate if it has not been calculated yet
-        if not hasattr(self, 'self.rate'):
+        if not hasattr(self, 'rate'):
             self.rate = self.meanFiringRate()
         mean_rates_per_pop = self.rate
 
@@ -657,8 +679,9 @@ class Analysis():
                                                             # spikes / [s]
 
             def calculate_BOLD(rate, area=None):
-                # Assuming the rate is binned in [ms]
-                t_vals = np.arange(0, len(rate)) / 1000.
+                # One sample per histogram bin, in s
+                t_vals = (np.arange(0, len(rate))
+                          * self.ana_dict['rate_histogram']['binsize'] / 1000.)
                 # Interpolate the rate in order to access values which do
                 # not lie on the grid. The ode solver might access values
                 # which are slightly out of the bounds of the interpolation
@@ -800,7 +823,7 @@ class Analysis():
         over all areas.
         ----------
         """
-        if not hasattr(self, 'self.rate'):
+        if not hasattr(self, 'rate'):
             self.rate = self.meanFiringRate()
         extension = self.ana_dict['extension']
         dpi = self.ana_dict['dpi']
@@ -849,7 +872,7 @@ class Analysis():
         """
         try:
             cc = pd.read_pickle(os.path.join(
-                self.sim_folder, 'cc.pkl'
+                self.ana_folder, 'cc.pkl'
             ))
         except FileNotFoundError:
             # lv = self.spikes.apply(LV, args=(t_ref, t_start, t_stop))
@@ -862,7 +885,7 @@ class Analysis():
             # )
             cc = pd.Series(cc, index=self.spikes.index)
 
-            cc.to_pickle(os.path.join(self.sim_folder, 'cc.pkl'))
+            cc.to_pickle(os.path.join(self.ana_folder, 'cc.pkl'))
         return cc
 
     def plotCorrCoff(self):
@@ -871,7 +894,7 @@ class Analysis():
         populations averaged over all areas.
         ----------
         """
-        if not hasattr(self, 'self.pop_cc'):
+        if not hasattr(self, 'pop_cc'):
             self.pop_cc = self.popCorrCoeff()
         extension = self.ana_dict['extension']
         dpi = self.ana_dict['dpi']
@@ -918,7 +941,7 @@ class Analysis():
         """
         try:
             lv = pd.read_pickle(os.path.join(
-                self.sim_folder, 'lv.pkl'
+                self.ana_folder, 'lv.pkl'
             ))
         except FileNotFoundError:
             # Question: divide by calculated lvs or all neurons?
@@ -939,7 +962,7 @@ class Analysis():
                    t_start, t_stop, min_spikes)
                 for (area, layer, pop), sts in self.spikes.items()
             ], index=self.spikes.index, dtype=float)
-            lv.to_pickle(os.path.join(self.sim_folder, 'lv.pkl'))
+            lv.to_pickle(os.path.join(self.ana_folder, 'lv.pkl'))
         return lv
 
     def plotPopLV(self):
@@ -948,7 +971,7 @@ class Analysis():
         over all areas.
         ----------
         """
-        if not hasattr(self, 'self.pop_lv'):
+        if not hasattr(self, 'pop_lv'):
             self.pop_lv = self.popLv()
         extension = self.ana_dict['extension']
         dpi = self.ana_dict['dpi']
@@ -995,7 +1018,7 @@ class Analysis():
         """
         try:
             cv_isi = pd.read_pickle(os.path.join(
-                self.sim_folder, 'cv_isi.pkl'
+                self.ana_folder, 'cv_isi.pkl'
             ))
         except FileNotFoundError:
             # Question: divide by calculated cv isis or all neurons?
@@ -1006,7 +1029,7 @@ class Analysis():
             min_spikes = self.ana_dict['cv']['min_spikes']
             cv_isi = self.spikes.apply(cvIsi, args=(t_start, t_stop,
                                                     min_spikes))
-            cv_isi.to_pickle(os.path.join(self.sim_folder, 'cv_isi.pkl'))
+            cv_isi.to_pickle(os.path.join(self.ana_folder, 'cv_isi.pkl'))
         return cv_isi
 
     def plotPopCVIsi(self):
@@ -1015,7 +1038,7 @@ class Analysis():
         over all areas.
         ----------
         """
-        if not hasattr(self, 'self.pop_cv_isi'):
+        if not hasattr(self, 'pop_cv_isi'):
             self.pop_cv_isi = self.popCvIsi()
         extension = self.ana_dict['extension']
         dpi = self.ana_dict['dpi']
@@ -3178,7 +3201,9 @@ class Analysis():
         # Simulated FC computation
         curr_in = self.synapticInputCurrent()
         synaptic_currents = curr_in.T
-        initial_transient = 500.
+        # The same window as calculateFuncionalConnectivityCorrelations, so
+        # that the figure and correlations.txt agree.
+        initial_transient = self.ana_dict['plotConnectivities']['tmin']
         tmax = self.sim_dict['t_sim']
         simulated_fc = synaptic_currents[
             (synaptic_currents.index >= initial_transient) & (synaptic_currents.index <= tmax)
@@ -3314,10 +3339,10 @@ class Analysis():
         """
         try:
             BOLD_correlation = pd.read_pickle(
-                    os.path.join(self.sim_folder, 'bold_correlation.pkl')
+                    os.path.join(self.ana_folder, 'bold_correlation.pkl')
                     )
         except FileNotFoundError:
-            if not hasattr(self, 'self.BOLD'):
+            if not hasattr(self, 'BOLD'):
                 self.BOLD = self.computeBOLD()
             # Start and end time, cast to [s]
             t_min = self.ana_dict['plotBOLD']['tmin'] / 1000.
@@ -3364,7 +3389,7 @@ class Analysis():
                                 ]
                             )[0,1]
             BOLD_correlation.to_pickle(
-                    os.path.join(self.sim_folder, 'bold_correlation.pkl')
+                    os.path.join(self.ana_folder, 'bold_correlation.pkl')
                     )
         return BOLD_correlation
 
@@ -3373,9 +3398,9 @@ class Analysis():
         """
         Calculates functional connectivity correlations.
         """
-        if not hasattr(self, 'self.BOLD_correlation'):
+        if not hasattr(self, 'BOLD_correlation'):
             self.BOLD_correlation = self.calculateBOLDConnectivity()
-        if not hasattr(self, 'self.rate'):
+        if not hasattr(self, 'curr_in'):
             self.curr_in = self.synapticInputCurrent()
         # Correlations will be written into this file
         outfile = open(os.path.join(self.ana_folder, 'correlations.txt'), 'w')
@@ -3677,7 +3702,7 @@ class Analysis():
         connectivity matrix has not been calculated yet, it will first 
         calculate it using the `calculateBOLDConnectivity` method.
         """
-        if not hasattr(self, 'self.BOLD_correlation'):
+        if not hasattr(self, 'BOLD_correlation'):
             self.BOLD_correlation = self.calculateBOLDConnectivity()
         # Plot
         extension = self.ana_dict['extension']
@@ -4351,10 +4376,8 @@ class Analysis():
         rate_hist_areas = self.rate_hist_areas * 1000.  # ms to s
         resolution = self.ana_dict['rate_histogram']['binsize']
 
-        if self.ana_dict['rate_histogram']['t_start']:
-            t_start = self.ana_dict['rate_histogram']['t_start']
-        else:
-            t_start = 0.
+        # Plotted window; the histogram itself always starts at 0
+        t_start = self.ana_dict['plotAllFiringRatesSummary'].get('t_start') or 0.
 
         if self.ana_dict['rate_histogram']['t_stop']:
             t_stop = self.ana_dict['rate_histogram']['t_stop']
@@ -5372,6 +5395,11 @@ def calc_rates(sts, sim_dict, ana_dict):
     Calculates the histogram of rates of a list of spiketrains sts.
     NOTE: The units of the returned rates are in spikes / ms
 
+    The histogram always starts at t = 0, so that bin i covers
+    [i * binsize, (i + 1) * binsize) ms: the synaptic currents, the kernel LFP
+    proxy, the BOLD signal and tools/make_fullscale_figures.py index it by
+    time on that basis and choose their own analysis windows.
+
     Returns
     -------
     rate : ndarray
@@ -5380,8 +5408,6 @@ def calc_rates(sts, sim_dict, ana_dict):
     resolution = ana_dict['rate_histogram']['binsize']
     t_min = 0.
     t_max = ana_dict['rate_histogram']['t_stop']
-    if t_min is None:
-        t_min = 0.
     if t_max is None:
         t_max = sim_dict['t_sim']
     num_bins = int((t_max - t_min) / resolution)
@@ -5642,5 +5668,5 @@ def analysisDictFromDump(dump_folder):
     """
     fn = os.path.join(dump_folder, 'ana.yaml')
     with open(fn, 'r') as ana_file:
-        ana_dict = yaml.load(ana_file)
+        ana_dict = yaml.load(ana_file, Loader=yaml.Loader)
     return ana_dict

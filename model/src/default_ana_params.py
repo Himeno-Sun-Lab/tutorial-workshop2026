@@ -17,9 +17,10 @@ params['seed'] = 2903
 params['python_sort'] = True
 params["I_syn_python_sort"] = False
 
+# The rate histogram always starts at t = 0 (see analysis.calc_rates); every
+# analysis built on it applies its own window.
 params['rate_histogram'] = {
     'binsize': 1.,    # in ms
-    't_start': 500.,  # in ms
     't_stop': None    # in ms
 }
 
@@ -61,7 +62,8 @@ params['functconn_corr'] = {
 }
 
 params['plotAllFiringRatesSummary'] = {
-    'num_col': 4
+    'num_col': 4,
+    't_start': 500.  # in ms, start of the plotted window
     }
 
 params['plotAllSynapticCurrentsSummary'] = {

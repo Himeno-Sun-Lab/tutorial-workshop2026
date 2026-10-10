@@ -191,11 +191,11 @@ def run_stage(stage, run, threads=4, quiet=False):
     log = root / "log" / f"{stage}.log"
     h = {s: root / f for s, f in STAGE_HASH_FILE.items()}
     cmd = {
-        "network":  ["python", "src/snakemake_network.py", str(exp),
+        "network":  [sys.executable, "src/snakemake_network.py", str(exp),
                      str(h["network"]), str(log)],
-        "simulate": ["python", "src/snakemake_simulation.py", str(exp),
+        "simulate": [sys.executable, "src/snakemake_simulation.py", str(exp),
                      str(h["network"]), str(h["simulate"]), str(threads), str(log)],
-        "analyse":  ["python", "src/snakemake_analysis.py", str(exp),
+        "analyse":  [sys.executable, "src/snakemake_analysis.py", str(exp),
                      str(h["network"]), str(h["simulate"]), str(h["analyse"]),
                      str(MODEL_ROOT), str(log)],
     }[stage]
@@ -328,13 +328,14 @@ def fullscale_fc(run, signal="synaptic"):
 
     * synaptic: correlation of the area-averaged synaptic input currents
       (``input_current.pkl``) from ``plotConnectivities.tmin`` on;
-    * bold: the stage-2 cache ``bold_correlation.pkl``;
-    * empirical: correlation of the BOLD time series the run was compared
-      against.  ``ana.yaml`` names it by its server path; it is imported under
-      the same path below ``experimental_data/``, i.e.
-      ``fullscale/experimental_data/...``.  Its right half (nodes 34:68) is the
-      simulated hemisphere; the nodes are labelled with the FreeSurfer order of
-      the model's own ``ROIs.txt``, as ``analysis.py`` does.
+    * bold: the analysis cache ``bold_correlation.pkl``;
+    * empirical: the right-hemisphere FC of the reference the run was compared
+      against, read as ``analysis.Analysis.personalFunctionalConnectivity``
+      does (68 or 84 nodes, BOLD series averaged over participants, or a
+      correlation matrix).  ``ana.yaml`` names it by its server path; it is
+      imported under the same path below ``experimental_data/``, i.e.
+      ``fullscale/experimental_data/...``.  The nodes are labelled with the
+      FreeSurfer order of the model's own ``ROIs.txt``, as ``analysis.py`` does.
     """
     import numpy as np
     import yaml
@@ -349,18 +350,38 @@ def fullscale_fc(run, signal="synaptic"):
 
     roi_file = MODEL_ROOT / "experimental_data" / "senden" / "rsData_7T_DKparcel" / "ROIs.txt"
     areas = [line.strip().split("-")[-1] for line in roi_file.read_text().splitlines()[14:48]]
-    bold = np.load(local)[:, 34:68, 0]
-    empirical = pd.DataFrame(bold, columns=areas).corr()
+    empirical = _empirical_fc_rh(np.load(local), areas, local)
 
     if signal == "synaptic":
         currents = pd.read_pickle(run_dir(run) / "input_current.pkl").T   # time x area
         simulated = currents[currents.index >= ana["plotConnectivities"]["tmin"]].corr()
     elif signal == "bold":
-        simulated = pd.read_pickle(sim_dir(run) / "bold_correlation.pkl")
+        simulated = pd.read_pickle(_analysis_result(run, "bold_correlation.pkl"))
     else:
         raise ValueError(f"signal must be 'synaptic' or 'bold', not {signal!r}")
     return (simulated.sort_index().sort_index(axis=1),
             empirical.sort_index().sort_index(axis=1))
+
+
+def _empirical_fc_rh(data, areas, path=""):
+    """Right-hemisphere FC (34x34 DataFrame) of an experimental_fc array.
+
+    The same layouts as ``Analysis.personalFunctionalConnectivities``: 68
+    cortical nodes (rh 34:68) or the 84-node DK parcellation (rh 49:83), each
+    as a ``(frames, nodes[, participants])`` BOLD series - correlated per
+    participant and averaged - or as a ``(nodes, nodes)`` correlation matrix.
+    """
+    import numpy as np
+
+    rh = {68: slice(34, 68), 84: slice(49, 83)}.get(data.shape[1])
+    if rh is None:
+        raise ValueError(f"experimental_fc {path} has {data.shape[1]} nodes; "
+                         "expected 68 or 84")
+    if data.ndim == 2 and data.shape[0] == data.shape[1]:
+        return pd.DataFrame(data[rh, rh], index=areas, columns=areas)
+    bold = data[:, :, np.newaxis] if data.ndim == 2 else data
+    fcs = [pd.DataFrame(bold[:, rh, i], columns=areas).corr() for i in range(bold.shape[2])]
+    return sum(fcs) / len(fcs)
 
 
 def describe_outputs(run):
@@ -417,9 +438,17 @@ def show_figure(name, width=900):
     display(Image(filename=str(path), width=width))
 
 
+def _analysis_result(run, name):
+    """A result file of the analysis stage: in the analysis directory, or -
+    for runs analysed before the analysis caches moved there, such as the
+    imported full-scale runs - one level up, next to the spikes."""
+    path = run_dir(run) / name
+    return path if path.exists() else sim_dir(run) / name
+
+
 def rates(run):
     """Population firing rates (Hz), MultiIndex (area, layer, pop)."""
-    return pd.read_pickle(sim_dir(run) / "rates.pkl")
+    return pd.read_pickle(_analysis_result(run, "rates.pkl"))
 
 
 def pop_level(series):
@@ -686,8 +715,9 @@ def eta_search(experiment, etas, seeds=None, t_sim=2000.0, threads=4):
     amyloid experiment) raises: it keeps the drive of its healthy control, and
     scanning it would invite pulling it back to the healthy working point.
 
-    Returns a DataFrame with one row per ``eta_ext`` (mean rates in Hz, drive
-    as a fraction of the distance to threshold, ``alive``).
+    Returns a DataFrame with one row per ``eta_ext`` (mean rates in Hz, the
+    mean input at the full-scale rates as a fraction of the distance to
+    threshold, ``alive``).
     """
     net, _ = _net_params(experiment)
     if net.get("neuron_types"):
@@ -715,7 +745,7 @@ def eta_search(experiment, etas, seeds=None, t_sim=2000.0, threads=4):
     table = pd.read_csv(out / "eta_search.csv")
     print(f"  done in {elapsed:.0f} s - {out.relative_to(TUTORIAL)}/")
     return table[["eta", "E", "I", "drive_fraction", "alive"]].rename(
-        columns={"E": "E (Hz)", "I": "I (Hz)", "drive_fraction": "drive / threshold"})
+        columns={"E": "E (Hz)", "I": "I (Hz)", "drive_fraction": "mean input / threshold"})
 
 
 def fullscale_rates(experiment, eta=None, iters=40, threads=8):
