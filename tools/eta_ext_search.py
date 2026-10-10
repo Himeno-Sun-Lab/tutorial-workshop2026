@@ -751,7 +751,7 @@ def plot(args, results):
     ax.legend(fontsize=8)
     fig.tight_layout()
     path = args.outdir / "eta_search.png"
-    fig.savefig(path, dpi=600)
+    fig.savefig(path, dpi=120)
     plt.close(fig)
     return path
 

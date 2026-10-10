@@ -12,7 +12,7 @@ params['extension'] = 'png'
 # Resolution (dots per inch) for every saved figure. Passed explicitly to each
 # savefig() call so it does not depend on matplotlib's ambient rcParams (which
 # plt.style.use() mutates globally and, in a few places, never resets).
-params['dpi'] = 600
+params['dpi'] = 120
 params['seed'] = 2903
 params['python_sort'] = True
 params["I_syn_python_sort"] = False
