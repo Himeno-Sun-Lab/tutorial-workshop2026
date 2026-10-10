@@ -219,9 +219,10 @@ __marimo__/
 
 # --- tutorial output -------------------------------------------------------
 results/
-# pipeline stage markers and generated seed variants
+# stage markers of the server's Snakemake layout
 experiments/*_hash
-experiments/*_seed*.py
 .ipynb_checkpoints/
-
+.DS_Store
 .vscode
+# full-scale runs imported from the server: patient-derived, kept local
+/fullscale/
