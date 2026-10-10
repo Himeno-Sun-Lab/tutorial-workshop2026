@@ -1,8 +1,8 @@
 # Environment for the tutorial.
 #
-#   mamba env create -f environment.yml          # or: conda env create -f ...
-#   mamba activate nest38
-#   python -m ipykernel install --user --name nest38 --display-name "Python (NEST 3.8)"
+#   mamba env create -f environment.yaml         # or: conda env create -f ...
+#   mamba activate nest3.8
+#   python -m ipykernel install --user --name nest3.8 --display-name "nest3.8"
 #
 # Then verify NEST before anything else:
 #   python -c "import nest; print(nest.__version__)"      # expect 3.8.0

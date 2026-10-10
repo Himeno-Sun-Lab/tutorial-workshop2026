@@ -193,10 +193,13 @@ params['scaling_factors_recurrent'] = {
     # Scale local E -> I connections, seems to be good to break synch due to
     # recurrent excitatory loops
     'local_scalingEtoI': 1.0,
-    # Scale cortico cortical excitatory on excitatory weights
-    'cc_scalingEtoE': 1.0,
-    # Scale cortico cortical excitatory on inhibitory weights
-    'cc_scalingEtoI': 2.0
+    # Scale cortico cortical excitatory on excitatory weights.
+    # 2.5: the value of the tutorial's experiments and full-scale runs
+    # (HuMAM's original default is 1.0).
+    'cc_scalingEtoE': 2.5,
+    # Scale cortico cortical excitatory on inhibitory weights, 2x the E->E
+    # value (HuMAM's original default is 2.0)
+    'cc_scalingEtoI': 5.0
 }
 # Scaling factors for the network numbers
 params['N_scaling'] = 1.0 # Scaling of population sizes

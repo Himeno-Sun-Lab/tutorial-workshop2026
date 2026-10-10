@@ -35,8 +35,8 @@ notebook shows three such runs, as figures rendered from the runs themselves (`f
 ## Contents
 |File|Detail|
 |---|---|
-| `Cortical_Model_Tutorial.ipynb` | The tutorial. 108 cells, English |
-| `environment.yml` | The conda environment, pinned — `mamba env create -f environment.yml` |
+| `Cortical_Model_Tutorial.ipynb` | The tutorial. 91 cells, English |
+| `environment.yaml` | The conda environment, pinned — `mamba env create -f environment.yaml` |
 | `experiments/tutorial_CN.py` | Healthy cortex — a fully commented experiment file, the model's control panel |
 | `experiments/tutorial_amyloid.py` | The same network with an amyloid-PET-derived pathology distribution |
 | `experiments/fullscale_rates/` | Full-scale rates for each experiment, from which the downscaling DC compensation is computed |
@@ -68,16 +68,17 @@ Docker image) and attach VS Code with the WSL extension.
 | Specs | **Minimum** | **Recommended** | Why |
 |---|---|---|---|
 | **CPU** | 4 physical cores | 8+ cores | NEST parallelises over OpenMP threads |
-| **RAM** | **8 GB** | **16 GB** | The default tutorial network needs 3.1 GB measured; the `tiny` variant needs 1.3 GB |
+| **RAM** | **8 GB** | **16 GB** | The default tutorial network (`N_scaling = 0.01`) needs ~5.9 GB by the memory rule of the notebook (0.3); `N_scaling = 0.002` needs 1.3 GB measured |
 | **Free disk** | 8 GB | 20 GB | ~4 GB environment, ~1.5 GB repository and its data, ~120 MB per completed run |
 | **GPU** | not used | not used | NEST 3.8 is a CPU simulator |
 
-**Laptop notes.** Plug in - both macOS and Windows down-clock hard on battery. Expect fans: a 5 s
-simulation is ~19 s of full-throttle multicore compute. If a cell seems to hang for minutes, you are
+**Laptop notes.** Plug in - both macOS and Windows down-clock hard on battery. Expect fans: at the default size
+NEST's simulation of the 4 s run alone takes 30-70 s of full-throttle multicore compute. If a cell seems to hang for minutes, you are
 probably swapping; stop it and use a smaller network (Part 2).
 
-Compute time is about **12 minutes**, in three marked blocks: two full pipeline runs (~3 min each)
-and an optional seed check (~6 min - every extra seed builds and simulates its own network).
+Compute time is about **20 minutes** (measured with 4 threads), in three marked blocks: two full
+pipeline runs (~6.5 min each) and a seed check (~7 min - every extra seed builds and simulates its
+own network).
 
 
 ## Quick start
@@ -88,9 +89,9 @@ git clone <TUTORIAL_REPOSITORY_URL> ~/Codes/Cortical-Model-Tutorial
 
 # 2. create the environment (once) -- every version pinned
 cd ~/Codes/Cortical-Model-Tutorial
-mamba env create -f environment.yml
-mamba activate nest38
-python -m ipykernel install --user --name nest38 --display-name "Python (NEST 3.8)"
+mamba env create -f environment.yaml
+mamba activate nest3.8
+python -m ipykernel install --user --name nest3.8 --display-name "nest3.8"
 
 # 3. verify NEST before anything else
 python -c "import nest; print(nest.__version__)"    # expect 3.8.0
@@ -100,7 +101,7 @@ cd ~/Codes/Cortical-Model-Tutorial
 jupyter lab Cortical_Model_Tutorial.ipynb
 ```
 
-The notebook is saved against a kernel named `nest38`, which is why the command above registers that
+The notebook is saved against a kernel named `nest3.8`, which is why the command above registers that
 name; if yours differs, pick it from Jupyter's kernel selector. NEST is the only thing the tutorial
 cannot bundle.
 
@@ -111,7 +112,8 @@ Edit `N_scaling` in `experiments/tutorial_CN.py` (and `tutorial_amyloid.py`):
 | `N_scaling` | Neurons | Synapses | Peak RAM | Simulate 5 s |
 |---|---|---|---|---|
 | 0.002 | 6.9 k | 8.6 M | 1.3 GB | ~7 s |
-| **0.005** (default) | 17 k | 21 M | 3.1 GB | ~19 s |
+| 0.005 | 17 k | 21 M | 3.1 GB | ~19 s |
+| **0.01** (default) | 34.7 k | 42.8 M | ~5.9 GB (predicted) | 30-70 s for the 4 s run |
 | 0.02 | 69 k | 86 M | ~10.6 GB | ~75 s |
 
 Hold `K_scaling` at 0.1 — it is the knob that changes the dynamics, and 0.1 is the value the project
@@ -184,8 +186,8 @@ A participant needs exactly three things:
 | Requirement | Notes |
 |---|---|
 | **This repository** | ~9 MB, model and data included |
-| **NEST 3.8 + the Python stack** | `mamba env create -f environment.yml` — 222 packages, 158 MB download, solve verified |
-| **A Jupyter kernel with NEST on it** | registered as `nest38`, or selected by hand |
+| **NEST 3.8 + the Python stack** | `mamba env create -f environment.yaml` — 222 packages, 158 MB download, solve verified |
+| **A Jupyter kernel with NEST on it** | registered as `nest3.8`, or selected by hand |
 
 plus 8–16 GB RAM, ~10 GB free disk (~120 MB per completed run), and Linux/macOS or WSL2 on Windows.
 

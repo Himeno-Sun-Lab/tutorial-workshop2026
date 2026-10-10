@@ -9,8 +9,9 @@ shrinks its *mean* by ``sqrt(K_scaling)``.  ``Network.extraDCforScaledNetwork()`
 adds back the missing ``(1-sqrt(k))*mu`` as a DC current (van Albada et al.
 2015), so the downscaled network approximates the full-scale network with the
 same parameters -- provided ``fullscale_rates`` are the rates of *that*
-full-scale network.  The model's ``base_theory_rates.pkl`` matches only the
-repository defaults; for any other configuration generate matching rates with
+full-scale network.  The model's ``base_theory_rates.pkl`` matches only
+``eta_ext = 1.1`` with HuMAM's original long-range gains (1.0 / 2.0, not the
+repository defaults 2.5 / 5.0); for any other configuration generate matching rates with
 ``tools/fullscale_rates.py`` and pass them with ``--fullscale-rates``.  The
 rates depend on ``eta_ext`` itself, so a final candidate must be confirmed with
 rates computed at that candidate (see the README).
@@ -599,8 +600,8 @@ def parse_args(argv=None):
                         "is computed from; they must belong to the configuration "
                         "being calibrated (see tools/fullscale_rates.py). "
                         "Default: the experiment's own file, else the model's "
-                        "base_theory_rates.pkl, which matches only the "
-                        "repository defaults")
+                        "base_theory_rates.pkl, which matches only "
+                        "eta_ext 1.1 with long-range gains 1.0 / 2.0")
 
     g = p.add_argument_group("simulation")
     g.add_argument("--t-sim", type=float, default=2000.0,

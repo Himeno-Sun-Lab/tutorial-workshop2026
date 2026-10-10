@@ -28,7 +28,7 @@ net_params = {
     # memory) scale as the product. K_scaling is the one that changes the
     # dynamics, so we keep it at the value the project validates and shrink
     # N_scaling instead. See Appendix A of the notebook.
-    "N_scaling": 0.01,        # ~347 k neurons, ~4.3e8 synapses (~55 GB)
+    "N_scaling": 0.01,        # 34.7 k neurons, 4.3e7 synapses (~5.9 GB)
     "K_scaling": 0.1,        # in-degree ~1250 instead of ~12500
     "scaling_type": "sqrt",  # weights scale as 1/sqrt(K_scaling)
 
@@ -46,10 +46,10 @@ net_params = {
 
     # ---- external drive ---------------------------------------------------
     # eta_ext = mean external input as a multiple of the distance to threshold.
-    # With the DC compensation the downscaled network stands in for the full-
-    # scale one, so this is the drive of the full model too. 1.1 is the
-    # repository default for cc_scaling 1.0 / 2.0; with the stronger long-range
-    # excitation below it leaves the network at E ~0.3 Hz. 5.0 sits in the middle
+    # 1.1 is the repository default and the drive of the full-scale runs
+    # (notebook Part 6). The downscaled network does not reproduce the
+    # full-scale working point at the same drive (notebook Appendix A.5): at 1.1
+    # it sits at E ~0.3 Hz, so its drive is calibrated on its own. 5.0 sits in the middle
     # of the window (~4.5-5.4) where both target bands hold, and puts the network
     # at E ~3.5 Hz, I ~13.1 Hz - which is exactly the state the fullscale_rates
     # file above holds (E mean 3.49 Hz, I mean 13.12 Hz), so the two must be
@@ -61,7 +61,8 @@ net_params = {
     # ---- connection strength ----------------------------------------------
     # Cortico-cortical excitatory weights, relative to the local ones. These two
     # are the main knobs the project uses to move the network between a quiet
-    # ground state and a metastable one.
+    # ground state and a metastable one. 2.5 / 5.0 equals the repository
+    # default; it is set here so that the control panel shows it.
     "scaling_factors_recurrent": {
         "cc_scalingEtoE": 2.5,
         "cc_scalingEtoI": 2.0 * 2.5,
