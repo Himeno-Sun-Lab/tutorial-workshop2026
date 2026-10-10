@@ -9,7 +9,7 @@ which use ``neuron_model_X`` / ``neuron_params_X`` / ``neuron_param_dist_X``::
 
     params['neuron_types'] = {
         'Abeta': {
-            'ratio_E': 'path/to/abeta_ratio.csv',
+            'ratio_E': 'path/to/amyloid_ratio.csv',
             'ratio_I': 0.0,
             'neuron_params_E': {'E_L': -65.0, 'V_th': -50.0},
         },

@@ -18,7 +18,7 @@ experimental_data/       the measurements the model is built from
   fraction_EI/               excitatory / inhibitory ratios per layer
   hcp_dti/                   diffusion-tractography connectome and distances
   senden/                    7T resting-state fMRI, used as the reference for functional connectivity
-  abeta/                     amyloid-PET-derived pathology distribution
+  amyloid/                   ADNI amyloid-PET map, and one participant's connectome and BOLD
 simulated_data/          precomputed full-scale mean-field rates (needed for downscaling)
 misc/mplstyles/          figure style used by the analysis stage
 ```

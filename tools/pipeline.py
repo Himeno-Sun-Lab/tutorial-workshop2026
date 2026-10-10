@@ -448,12 +448,12 @@ def fullscale_estimate(experiment):
     return pd.read_pickle(_experiment(experiment)["net_params"]["fullscale_rates"])
 
 
-def amyloid_burden(csv="abeta_ratio.csv"):
+def amyloid_burden(csv="amyloid_ratio.csv"):
     """Per-area amyloid burden from a PET-derived CSV, as a Series sorted descending.
 
     The 'default' row (the fallback for areas the scan does not cover) is dropped.
     """
-    path = MODEL_ROOT / "experimental_data" / "abeta" / csv
+    path = MODEL_ROOT / "experimental_data" / "amyloid" / csv
     table = pd.read_csv(path)
     return (table[table["area"] != "default"]
             .set_index("area")["ratio"].sort_values(ascending=False))
@@ -634,8 +634,8 @@ def rates_for_seed(experiment, seed, t_start=None, t_stop=None, threads=4):
 
 # ------------------------------------------------------ working-point calibration --
 # The two tools of the calibration, tools/eta_ext_search.py and
-# tools/fullscale_rates.py, are command-line programs. These wrappers read the
-# settings they need from an experiment file and write everything under
+# tools/fullscale_rates.py, are command-line programs. Both read the experiment
+# file themselves; these wrappers hand it over and write everything under
 # results/calibration/<experiment>/ - never into experiments/, so a calibration
 # run cannot overwrite the rates an experiment ships with.
 CALIBRATION = RESULTS / "calibration"
@@ -675,21 +675,21 @@ def _net_params(experiment):
 def eta_search(experiment, etas, seeds=None, t_sim=2000.0, threads=4):
     """Mean E / I rates of `experiment` for every external drive in `etas`.
 
-    Runs ``tools/eta_ext_search.py --method scan``: for every ``eta_ext`` a
-    network is built with the experiment's scale, long-range gains, connectome
-    and full-scale rates, simulated for `t_sim` ms (the first 500 ms discarded)
-    and its population rates counted.
+    Runs ``tools/eta_ext_search.py --experiment <file> --method scan``: for
+    every ``eta_ext`` a network is built from the experiment file as it is - all
+    of its ``net_params`` (scale, gains, connectome, neurons, cytoarchitecture,
+    full-scale rates) - simulated for `t_sim` ms (the first 500 ms discarded)
+    and its population rates counted.  `seeds` defaults to the experiment's
+    ``master_seed``.
 
     Only a healthy experiment can be scanned.  One with neuron types (e.g. the
     amyloid experiment) raises: it keeps the drive of its healthy control, and
     scanning it would invite pulling it back to the healthy working point.
-    Changed neuron parameters cannot be passed to the tool either; they are
-    reported, since the scan then runs the default neurons.
 
     Returns a DataFrame with one row per ``eta_ext`` (mean rates in Hz, drive
     as a fraction of the distance to threshold, ``alive``).
     """
-    net, defaults = _net_params(experiment)
+    net, _ = _net_params(experiment)
     if net.get("neuron_types"):
         raise ValueError(
             f"{experiment} declares neuron types ({', '.join(net['neuron_types'])}). "
@@ -698,30 +698,14 @@ def eta_search(experiment, etas, seeds=None, t_sim=2000.0, threads=4):
             "Scan the healthy control instead (e.g. tutorial_CN).")
     out = CALIBRATION / experiment / "eta_search"
     out.mkdir(parents=True, exist_ok=True)
-    gains = net["scaling_factors_recurrent"]
-    args = ["--method", "scan", "--eta-list", *etas,
-            "--n-scaling", net["N_scaling"], "--k-scaling", net["K_scaling"],
-            "--scaling-type", net["scaling_type"],
-            "--cc-e-to-e", gains.get("cc_scalingEtoE", 1.0),
-            "--cc-e-to-i", gains.get("cc_scalingEtoI", 2.0),
-            "--seeds", *(seeds or [master_seed(experiment)]),
+    args = ["--experiment", EXPERIMENTS / f"{experiment}.py",
+            "--method", "scan", "--eta-list", *etas,
             "--t-sim", t_sim, "--threads", threads,
             "--outdir", out, "--log-level", "WARNING", "--no-plot"]
-    if net.get("fullscale_rates"):
-        args += ["--fullscale-rates", net["fullscale_rates"]]
-    con = net["predictive_connectomic_params"].get("con_path")
-    if con and con != defaults["predictive_connectomic_params"]["con_path"]:
-        args += ["--con-path", con]          # an individual connectome
-
-    ignored = [k for k in ("neuron_params_E", "neuron_params_I",
-                           "neuron_model_E", "neuron_model_I")
-               if net[k] != defaults[k]]
+    if seeds:
+        args += ["--seeds", *seeds]
     print(f"eta_ext scan of {experiment}: N_scaling={net['N_scaling']}, "
           f"K_scaling={net['K_scaling']}, {len(etas)} values x {t_sim:.0f} ms")
-    if ignored:
-        print(f"  WARNING: {experiment} sets {', '.join(ignored)}, which the scan cannot\n"
-              f"  pass on: it runs the default neurons, with {experiment}'s full-scale\n"
-              f"  rates - the rates below do not belong to {experiment}.")
 
     def show(line):
         line = line.rstrip()
