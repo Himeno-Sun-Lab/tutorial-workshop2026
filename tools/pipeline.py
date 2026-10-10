@@ -39,9 +39,12 @@ rendered from them, with the numbers the notebook text quotes::
 ``show_figure("fullscale/<run>/<name>.png")`` displays one of them; this is what
 the notebook's Part 6.2 uses, and it needs nothing but the repository.
 
-*Local: the runs.*  On a machine that holds them, a run is imported unchanged,
-in the layout the server's Snakemake workflow wrote it - nothing is converted,
-so the hashes still name the directories they were computed for::
+*For developers: the runs.*  The figures are rendered on a machine that holds
+the runs, by ``tools/make_fullscale_figures.py`` - a developer tool that ships in
+``tools/`` but that participants never run and the notebook does not use (see
+the README).  There a run is imported unchanged, in the layout the server's
+Snakemake workflow wrote it - nothing is converted, so the hashes still name
+the directories they were computed for::
 
     fullscale/experiments/<run>.py                     the experiment file
     fullscale/experiments/<run>.{network,simulation,analysis}_hash
@@ -54,10 +57,8 @@ so the hashes still name the directories they were computed for::
 ``has_fullscale(run)`` tells whether it is there.  Every reader below - ``show``,
 ``rates``, ``load_result``, ``area_mean_rate``, ``sim_dir`` - then accepts its
 name in place of a laptop run, and ``fullscale_info`` / ``fullscale_fc`` add its
-provenance and its FC matrices.  ``tools/make_fullscale_figures.py`` uses them
-to render ``figures/fullscale/`` from these runs; re-run it, and commit its
-output, whenever a run or a figure changes.  ``fullscale/`` itself is
-gitignored and is only ever read.
+provenance and its FC matrices - the readers the rendering script is built on.
+``fullscale/`` itself is gitignored and is only ever read.
 
 The notebook imports from here so that its cells show the *model* - parameters,
 rates, pathology - rather than path juggling.  Everything is importable outside
@@ -403,8 +404,9 @@ FIGURES = TUTORIAL / "figures"
 def show_figure(name, width=900):
     """Display a figure shipped with the tutorial, ``figures/<name>``.
 
-    The full-scale run is not distributed (it is patient-derived and ~2 GB), so
-    its figures are rendered in advance by ``tools/make_fullscale_figures.py``.
+    The full-scale runs are not distributed (they are patient-derived and
+    2-3.5 GB each), so their figures are rendered in advance by the developers
+    and shipped in ``figures/fullscale/``.
     """
     from IPython.display import Image, display
 
