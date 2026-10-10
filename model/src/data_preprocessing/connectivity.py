@@ -107,8 +107,10 @@ class SynapseNumbers():
             assert(np.array_equal(NOS.index.values, self.area_list))
             # Calculate relNOS and account for FLN (cortico-cortical)
             relSynapses = (1 - FLN) * NOS.div(NOS.sum(axis=1), axis=0)
-            # Account for FLN (intra-area)
-            np.fill_diagonal(relSynapses.values, FLN)
+            # Account for FLN (intra-area). On a copy: under pandas'
+            # copy-on-write DataFrame.values is a read-only view.
+            relSynapses = relSynapses.mask(
+                np.eye(len(relSynapses), dtype=bool), FLN)
             # Calculate area specific synapse numbers
             self.N_syn_CC = relSynapses.mul(local_synapses, axis=0)
             # print(os.getcwd())

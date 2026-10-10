@@ -48,8 +48,10 @@ Each ``ratio_X`` may be specified in one of four forms:
    distribution be controlled hierarchically from an external file.
 
 In the dict forms an optional ``"default"`` key provides the fallback fraction
-for unlisted areas (top level) or unlisted layers (nested). When no
-``"default"`` is given, unlisted areas/layers receive a fraction of ``0.0``.
+for unlisted areas (top level) or unlisted layers (nested). A layer an area's
+nested dict does not list takes that area's ``"default"``, else the top-level
+``"default"``, else ``0.0``; an unlisted area takes the top-level ``"default"``,
+else ``0.0``.
 
 CSV format
 ----------
@@ -353,8 +355,9 @@ def resolve_ratio(ratio, area, layer):
     Returns
     -------
     float
-        The fraction in ``[0, 1]``. Areas/layers not covered by a dict resolve
-        to ``0.0`` unless a ``"default"`` entry is present.
+        The fraction in ``[0, 1]``. A layer missing from an area's nested dict
+        falls back to the area's ``"default"``, then to the top-level
+        ``"default"`` (if that is a number), then to ``0.0``.
     """
     if isinstance(ratio, str):
         raise TypeError(
@@ -379,6 +382,12 @@ def resolve_ratio(ratio, area, layer):
         return float(area_val[layer])
     if _DEFAULT_KEY in area_val:
         return float(area_val[_DEFAULT_KEY])
+    # An area-specific dict without its own default still inherits the
+    # global one (unless that is itself a per-layer dict, which belongs to
+    # unlisted areas only).
+    top = ratio.get(_DEFAULT_KEY) if area in ratio else None
+    if _is_number(top):
+        return float(top)
     return 0.0
 
 

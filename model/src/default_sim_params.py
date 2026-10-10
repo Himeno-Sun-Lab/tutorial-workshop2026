@@ -32,5 +32,13 @@ params = {
     'delay_cc_min': 0.,
     # Recording devices.
     'rec_dev': ['spike_recorder']
+    # Optional, deliberately not a default entry so that the simulation hash
+    # of existing runs is unchanged:
+    # 'external_weight_sd': 'per_neuron' (default) or 'per_synapse'.
+    # Each neuron receives its external Poisson input through one connection
+    # with one random weight. 'per_neuron' draws it with the synaptic s.d.
+    # (PSP_rel), so the mean external drive differs by PSP_rel between
+    # neurons; 'per_synapse' uses s.d./sqrt(K_ext), the spread of the mean of
+    # K_ext independently drawn synaptic weights.
 }
 params["stimuli"] = {}

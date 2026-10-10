@@ -461,6 +461,7 @@ class Simulation():
                 'record_to': 'ascii',
                 'label': os.path.join(self.volt_path, 'voltmeter'),
                 'record_from': ['V_m'],
+                'interval': self.sim_dict['rec_V_int'],
             }
             self.voltmeter = nest.Create('multimeter', params=recdictmem)
         if "I_syn" in self.sim_dict["rec_dev"]:
@@ -600,8 +601,11 @@ class Simulation():
                                 'p': p_center * nest.spatial_distributions.gaussian2D(
                          nest.spatial.distance.x, nest.spatial.distance.y, std_x=sigma_x, std_y=sigma_y),
                             }
-                        except KeyError:
-                            self.rank_logger.warning('Spatial connection parameter required but not found')
+                        except KeyError as err:
+                            msg = ('pairwise_bernoulli needs sim_params '
+                                   '"sigma_x" and "sigma_y"; missing {}'.format(err))
+                            self.rank_logger.error(msg)
+                            raise KeyError(msg) from err
 
                     else:
                         msg = f'Unknown connection rule {conn_rule}.'
@@ -650,6 +654,18 @@ class Simulation():
         """
         if self.logger:
             self.logger.info('Poisson background input is connected')
+        # Every neuron receives its whole external input through one
+        # connection, so it draws one weight for all of its K_ext external
+        # synapses. 'per_neuron' (the default) draws it with the synaptic s.d.,
+        # which spreads the mean external drive across neurons by PSP_rel;
+        # 'per_synapse' divides the s.d. by sqrt(K_ext), the spread of the mean
+        # of K_ext independently drawn weights.
+        weight_sd = self.sim_dict.get('external_weight_sd', 'per_neuron')
+        if weight_sd not in ('per_neuron', 'per_synapse'):
+            msg = ("external_weight_sd must be 'per_neuron' or 'per_synapse', "
+                   "not {!r}".format(weight_sd))
+            self.rank_logger.error(msg)
+            raise ValueError(msg)
         for (area_i, layer_i, pop_i), target_pop in self.pops.items():
             conn_dict_poisson = {'rule': 'all_to_all'}
             weight = self.net_dict['weights_ext'].loc[
@@ -658,6 +674,10 @@ class Simulation():
             w_sd = self.net_dict['weights_ext_sd'].loc[
                 (area_i, layer_i, pop_i)
             ]
+            if weight_sd == 'per_synapse':
+                k_ext = (self.net_dict['synapses_external'].loc[(area_i, layer_i, pop_i)]
+                         / self.net_dict['neuron_numbers'].loc[(area_i, layer_i, pop_i)])
+                w_sd = w_sd / np.sqrt(k_ext) if k_ext > 0 else w_sd
             syn_dict_poisson = {
                 'synapse_model': 'static_synapse',
                 'weight': nest.math.max(nest.random.normal(mean=weight, std=w_sd), 0.0),
@@ -682,7 +702,7 @@ class Simulation():
             sn_ext = self.net_dict['synapses_external'].loc[pop]
             K_ext = sn_ext / nn
             # Choose first item in list of target gids
-            target_pop = [self.pops[pop][0]]
+            target_pop = self.pops[pop][0]
             weight = self.net_dict['weights_ext'].loc[pop]
             # Scale weight
             weight *= 1e3*K_ext
@@ -780,23 +800,15 @@ class Simulation():
         hash : str
             Hash for the simulation
         """
-        stim = {}
-        for key, val in self.sim_dict["stimuli"].items():
-            if isinstance(key, tuple):
-                key = "_".join(str(k) for k in key)
-                stim[key] = val
-        if stim:
-            self.sim_dict["stimuli"] = stim
-        hash = dicthash.generate_hash_from_dict(self.sim_dict)
-        
-        stim = {}
-        for key, val in self.sim_dict["stimuli"].items():
-            if isinstance(key, str):
-                key = tuple(key.split("_"))
-                stim[key] = val
-        if stim:
-            self.sim_dict["stimuli"] = stim
-        return hash
+        # dicthash needs string keys: (area, layer, pop) stimulus keys are
+        # joined with "_" on a copy, so sim_dict keeps its tuple keys. This
+        # gives the same hash as before for tuple-keyed stimuli.
+        hashed = dict(self.sim_dict)
+        hashed["stimuli"] = {
+            "_".join(str(k) for k in key) if isinstance(key, tuple) else key: val
+            for key, val in self.sim_dict["stimuli"].items()
+        }
+        return dicthash.generate_hash_from_dict(hashed)
 
     def _getMemoryMB(self):
         """

@@ -871,8 +871,7 @@ class Network():
         PSC_over_PSP : float
         """
         if neuron_model in ['iaf_psc_exp', 'mat2_psc_exp']:
-            eps = tau_syn / tau_m
-            PSC_over_PSP = C_m * eps**(-1/(1-eps)) / tau_m
+            PSC_over_PSP = C_m * _peak_factor(tau_syn / tau_m) / tau_m
         else:
             raise NotImplementedError(
                 "Conversion PSP -> PSC for {} unknown.".format(neuron_model)
@@ -899,13 +898,24 @@ class Network():
         PSP_over_PSC : float
         """
         if neuron_model in ['iaf_psc_exp', 'mat2_psc_exp']:
-            eps = tau_syn / tau_m
-            PSP_over_PSC = tau_m / (C_m * eps**(-1/(1-eps))) 
+            PSP_over_PSC = tau_m / (C_m * _peak_factor(tau_syn / tau_m))
         else:
             raise NotImplementedError(
                 "Conversion PSC -> PSP for {} unknown.".format(neuron_model)
             )
         return PSP_over_PSC 
+
+def _peak_factor(eps):
+    """
+    ``eps**(-1/(1-eps))`` with ``eps = tau_syn / tau_m``: the factor between
+    the PSC amplitude and the peak PSP of an exponential synapse on an LIF
+    neuron. The expression is 0/0 at ``tau_syn == tau_m``; its limit there
+    is ``e``.
+    """
+    if np.isclose(eps, 1.0):
+        return np.e
+    return eps**(-1/(1-eps))
+
 
 def networkDictFromDump(dump_folder):
     """

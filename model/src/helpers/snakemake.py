@@ -32,44 +32,65 @@ def get_git_revision_hash():
     return git_hash
 
 
+def _is_number(value):
+    """True for int and float, excluding bool."""
+    return isinstance(value, (int, float)) and not isinstance(value, bool)
+
+
 def nested_dict_update(default_dict, specific_dict, logger=None):
     """
     Updates the values of default_dict by the values in specific_dict
     recursively.
+
+    ``neuron_params_X`` / ``neuron_param_dist_X`` dicts replace the default as
+    a whole. Every other dict is merged into the default dict of the same key.
+    A value must have the type of the default it replaces; ``int`` and
+    ``float`` are interchangeable as long as no information is lost (the value
+    takes the default's type). A key the defaults do not have, or whose
+    default is None, is taken as it is.
+
+    Raises
+    ------
+    TypeError
+        If a value's type does not match its default, including a dict given
+        for a default that is not a dict.
     """
+    def _mismatch(key, value, default):
+        return TypeError(
+            'Type of specific_dict[{0}]={1!r} and default_dict[{0}]={2!r} '
+            "don't match.".format(key, value, default))
+
     for key in specific_dict:
+        value = specific_dict[key]
         # Fully replace neuron_params_X or neuron_param_dist_X dictionaries
         if isinstance(key, str) and key.startswith('neuron_param'):
             if logger:
-                logger.debug('Specified %s dict to %s', key, specific_dict[key])
-            default_dict[key] = specific_dict[key]
+                logger.debug('Specified %s dict to %s', key, value)
+            default_dict[key] = value
+            continue
 
-        elif isinstance(specific_dict[key], dict):
-            if key not in default_dict:
-                # 直接添加，不递归
-                default_dict[key] = specific_dict[key]
-            elif isinstance(default_dict[key], dict):
-                # 递归更新
-                nested_dict_update(default_dict[key], specific_dict[key], logger)
-        # elif isinstance(specific_dict[key], dict):
-        #     nested_dict_update(default_dict[key], specific_dict[key])
-        else:
-            if key in default_dict.keys():
-                if isinstance(specific_dict[key], type(default_dict[key])) or default_dict[key] is None:
-                    default_dict[key] = specific_dict[key]
-                else:
-                    raise TypeError(
-                        'Type of specific_dict[{0}]={1} and '
-                        'default_dict[{0}]={2} dont match.'.format(
-                            key,
-                            specific_dict[key],
-                            default_dict[key]
-                        )
-                    )
+        if key not in default_dict or default_dict[key] is None:
+            if logger:
+                logger.debug('Adding entry default_dict[%s]=%s', key, value)
+            default_dict[key] = value
+            continue
+
+        default = default_dict[key]
+        if isinstance(value, dict):
+            if not isinstance(default, dict):
+                raise _mismatch(key, value, default)
+            nested_dict_update(default, value, logger)
+        elif isinstance(value, type(default)):
+            default_dict[key] = value
+        elif _is_number(value) and _is_number(default):
+            if isinstance(default, float):
+                default_dict[key] = float(value)
+            elif float(value).is_integer():
+                default_dict[key] = int(value)
             else:
-                if logger:
-                    logger.debug('Adding entry default_dict[%s]=%s', key, specific_dict[key])
-                default_dict[key] = specific_dict[key]
+                raise _mismatch(key, value, default)
+        else:
+            raise _mismatch(key, value, default)
 
 
 def build_loggers(log_path, mode='DEBUG'):
