@@ -226,3 +226,6 @@ experiments/*_hash
 .vscode
 # full-scale runs imported from the server: patient-derived, kept local
 /fullscale/
+# local test experiment, not part of the tutorial
+experiments/test_celltypes.py
+experiments/fullscale_rates/test_celltypes.pkl
