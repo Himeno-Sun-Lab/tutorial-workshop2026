@@ -1,0 +1,83 @@
+{
+  "switch_detected": {
+    "t": 4800,
+    "rate_ratio": 1.6750435589685742
+  },
+  "states": {
+    "t_switch": null,
+    "quiet_episodes": [],
+    "quiet_fraction": 0.0,
+    "changes": 0,
+    "intervals": {
+      "active": [
+        [
+          1000,
+          10000
+        ]
+      ]
+    }
+  },
+  "info": {
+    "N_scaling": "1.0",
+    "K_scaling": "1.0",
+    "scaling_type": "linear",
+    "neurons": "3468839",
+    "internal synapses": "4.28e+10",
+    "eta_ext": "1.1",
+    "cc_scalingEtoE / EtoI": "2.5 / 5.0",
+    "neuron types": "none",
+    "connectome": "sub011_R.mat",
+    "t_sim (ms)": "10000.0",
+    "master_seed": "2903",
+    "network hash": "3640423b1585d9be684f26d093753dfe",
+    "simulation hash": "34574788f935bb5edb888e616bf56d55",
+    "analysis hash": "a8ef38021ec241bba615281bb462c9c6"
+  },
+  "whole_run": {
+    "E": 3.0542373905444506,
+    "I": 9.771080927663515
+  },
+  "rates_active": {
+    "E": 3.054258246823636,
+    "I": 9.771155722987446,
+    "silent": 0,
+    "fastest": 153.76520305091734
+  },
+  "raster_areas": [
+    "postcentral",
+    "pericalcarine",
+    "caudalanteriorcingulate"
+  ],
+  "raster_window": [
+    3500,
+    6500
+  ],
+  "stats_active": {
+    "median": {
+      "rate": {
+        "E": 0.08,
+        "I": 1.732
+      },
+      "cv": {
+        "E": 0.83,
+        "I": 0.796
+      },
+      "cc": {
+        "E": 0.008,
+        "I": 0.002
+      }
+    },
+    "pops_rate_above_10": 27,
+    "max_rate": 153.76520305091734,
+    "pops_cv_above_1_2": 7,
+    "pops_cc_above_0_1": 30,
+    "max_cc": 0.8682109276218921
+  },
+  "fc": {
+    "whole": 0.11878773509748404,
+    "active": 0.11878773509748404,
+    "sim_mean": 0.7042288575529806,
+    "exp__sim_syn__corr_rh": 0.1187877350974825,
+    "exp__sim_bold__corr_rh": 0.2918876921240566
+  }
+}
