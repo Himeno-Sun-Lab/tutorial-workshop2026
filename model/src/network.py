@@ -6,7 +6,7 @@ import pandas as pd
 from copy import deepcopy
 from dicthash import dicthash
 
-from helpers.abeta import normalize_abeta_ratio
+from helpers.neuron_types import normalize_neuron_types
 
 
 class Network():
@@ -31,7 +31,6 @@ class Network():
         self.SN = SN
         self.logger = logger
 
-        self.net["Abeta"] = params["Abeta"] # Abeta Flag
         self.net["topographic_mapping"] = params["topographic_mapping"] # topographic mapping
         self.net['area_list'] = NN.area_list
         self.net['layer_list'] = NN.layer_list
@@ -45,27 +44,27 @@ class Network():
         self.net['neuron_params_I'] = params['neuron_params_I']
         self.net['neuron_param_dist_E'] = params['neuron_param_dist_E']
         self.net['neuron_param_dist_I'] = params['neuron_param_dist_I']
-        
-        if self.net["Abeta"]:
-            # Abeta_ratio may be a scalar, a (nested) dict, or a path string to
-            # a CSV; normalize to the canonical scalar/dict form once here so the
-            # dumped network (and every downstream consumer) holds a value that
-            # needs no further filesystem access.
-            self.net["Abeta_ratio_E"] = normalize_abeta_ratio(
-                params["Abeta_ratio_E"], "Abeta_ratio_E",
-                area_list=NN.area_list, layer_list=NN.layer_list,
-                logger=self.logger)
-            self.net["Abeta_ratio_I"] = normalize_abeta_ratio(
-                params["Abeta_ratio_I"], "Abeta_ratio_I",
-                area_list=NN.area_list, layer_list=NN.layer_list,
-                logger=self.logger)
-            self.net['neuron_model_Abeta_E'] = params['neuron_model_Abeta_E'] # excitatory neuron impacted by Abeta
-            self.net['neuron_model_Abeta_I'] = params['neuron_model_Abeta_I'] # inhibitory neuron impacted by Abeta
-            self.net['neuron_params_Abeta_E'] = params['neuron_params_Abeta_E'] # excitatory neuron impacted by Abeta
-            self.net['neuron_params_Abeta_I'] = params['neuron_params_Abeta_I'] # inhibitory neuron impacted by Abeta
-            self.net['neuron_param_dist_Abeta_E'] = params['neuron_param_dist_Abeta_E'] # excitatory neuron impacted by Abeta
-            self.net['neuron_param_dist_Abeta_I'] = params['neuron_param_dist_Abeta_I'] # inhibitory neuron impacted by Abeta
-        
+
+        # The per-type keys used before neuron_types existed would otherwise be
+        # ignored silently, turning an old experiment into a healthy network.
+        obsolete = sorted(k for k in params if k == 'Abeta' or 'Abeta_' in k)
+        if obsolete:
+            msg = ('Obsolete parameters {}: declare the neuron type in '
+                   "params['neuron_types'] instead (see "
+                   'helpers/neuron_types.py)'.format(obsolete))
+            if self.logger:
+                self.logger.error(msg)
+            raise ValueError(msg)
+
+        # Additional neuron types. Ratios may be given as CSV paths and
+        # parameters as overrides of the base neuron; normalize to the complete,
+        # canonical form once here so the dumped network (and every downstream
+        # consumer) needs no further filesystem access or defaults.
+        self.net['neuron_types'] = normalize_neuron_types(
+            params.get('neuron_types'), self.net,
+            area_list=NN.area_list, layer_list=NN.layer_list,
+            logger=self.logger)
+
         self.net['neuron_numbers'] = NN.getNeuronNumbers()
 
         # ===== Connections =====
@@ -546,8 +545,15 @@ class Network():
                 self.logger.error(msg)
             raise ValueError(msg)
 
-        # Mean input of the full-scale network, before anything is scaled
+        # Mean input of the full-scale network, before anything is scaled.
+        # tau_syn belongs to the receiving neuron, so every neuron type has a
+        # mean input of its own.
         mean_input_full = self._meanSynapticInput()
+        mean_input_full_types = {
+            name: self._meanSynapticInput(t['neuron_params_E'],
+                                          t['neuron_params_I'])
+            for name, t in self.net['neuron_types'].items()
+        }
 
         # Scale neuron numbers
         self.net['neuron_numbers'] = np.round(
@@ -570,9 +576,9 @@ class Network():
         self.net['weights_ext_sd'] /= scaling_factor
 
         # Add extra DC drive based on scaled network
-        self.extraDCforScaledNetwork(mean_input_full)
+        self.extraDCforScaledNetwork(mean_input_full, mean_input_full_types)
 
-    def extraDCforScaledNetwork(self, mean_input_full):
+    def extraDCforScaledNetwork(self, mean_input_full, mean_input_full_types=None):
         """
         Add extra DC drive that compensates the mean input lost by scaling.
 
@@ -593,7 +599,24 @@ class Network():
         mean_input_full : Series
             Mean synaptic input current (pA) of the full-scale network, as
             returned by _meanSynapticInput() before scaling.
+        mean_input_full_types : dict, optional
+            The same for every neuron type, ``{name: Series}``. The DC current
+            of each type is stored in the DataFrame ``dc_drive_types``
+            (populations x types), since types with other synaptic time
+            constants lose a different mean input by the scaling.
         """
+        dc_before = self.net['dc_drive']
+        dc_types = {}
+        for name, full in (mean_input_full_types or {}).items():
+            t = self.net['neuron_types'][name]
+            extra = (full - self._meanSynapticInput(
+                t['neuron_params_E'], t['neuron_params_I'])).reindex(
+                dc_before.index).fillna(0.)
+            extra[self.net['neuron_numbers'] < 1] = 0.
+            dc_types[name] = dc_before + extra
+        if dc_types:
+            self.net['dc_drive_types'] = pd.DataFrame(dc_types)
+
         mean_input_scaled = self._meanSynapticInput()
         extra_dc = (mean_input_full - mean_input_scaled).reindex(
             self.net['dc_drive'].index).fillna(0.)
@@ -601,7 +624,7 @@ class Network():
         extra_dc[self.net['neuron_numbers'] < 1] = 0.
         self.net['dc_drive'] = self.net['dc_drive'] + extra_dc
 
-    def _meanSynapticInput(self):
+    def _meanSynapticInput(self, params_E=None, params_I=None):
         """
         Stationary mean synaptic input current (pA) of every non-empty
         population, recurrent plus external Poisson input, with the recurrent
@@ -612,6 +635,13 @@ class Network():
               + 1e-3 * J_ext_i * tau_syn_ex_i * K_ext_i * nu_ext_i
 
         with J in pA, tau_syn in ms and rates in 1/s.
+
+        Parameters
+        ----------
+        params_E, params_I : dict, optional
+            Neuron parameters of the receiving neurons, whose synaptic time
+            constants are used. Missing entries and the default (None) are
+            taken from the base neurons.
 
         Returns
         -------
@@ -639,8 +669,8 @@ class Network():
         # Synaptic time constants: rows are targets, columns sources
         ix_E = (slice(None), slice(None), 'E')
         ix_I = (slice(None), slice(None), 'I')
-        prm_E = self.net['neuron_params_E']
-        prm_I = self.net['neuron_params_I']
+        prm_E = {**self.net['neuron_params_E'], **(params_E or {})}
+        prm_I = {**self.net['neuron_params_I'], **(params_I or {})}
         tau_syn = pd.DataFrame(data=0., index=N.index, columns=N.index)
         tau_syn.loc[ix_E, ix_E] = prm_E['tau_syn_ex']
         tau_syn.loc[ix_E, ix_I] = prm_E['tau_syn_in']

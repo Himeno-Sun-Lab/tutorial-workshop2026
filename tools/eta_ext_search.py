@@ -9,8 +9,9 @@ shrinks its *mean* by ``sqrt(K_scaling)``.  ``Network.extraDCforScaledNetwork()`
 adds back the missing ``(1-sqrt(k))*mu`` as a DC current (van Albada et al.
 2015), so the downscaled network approximates the full-scale network with the
 same parameters -- provided ``fullscale_rates`` are the rates of *that*
-full-scale network.  The model's ``base_theory_rates.pkl`` matches only the
-repository defaults; for any other configuration generate matching rates with
+full-scale network.  The model's ``base_theory_rates.pkl`` matches only
+``eta_ext = 1.1`` with HuMAM's original long-range gains (1.0 / 2.0, not the
+repository defaults 2.5 / 5.0); for any other configuration generate matching rates with
 ``tools/fullscale_rates.py`` and pass them with ``--fullscale-rates``.  The
 rates depend on ``eta_ext`` itself, so a final candidate must be confirmed with
 rates computed at that candidate (see the README).
@@ -19,6 +20,11 @@ This script searches for the ``eta_ext`` that (a) wakes the network up and
 (b) puts it in the rate band the project targets elsewhere
 (``src/roi_parameter_search.py``): area-averaged excitatory rates 3-5 Hz,
 inhibitory rates 5-15 Hz.
+
+It calibrates the healthy network only: no neuron types (``neuron_types``)
+can be added.  A pathological experiment keeps the drive of its healthy
+control; recalibrating it would pull it back to the healthy working point and
+remove the very effect under study.
 
 Three evaluation methods, cheapest first
 ----------------------------------------
@@ -59,6 +65,11 @@ that if you keep it elsewhere.  Network dumps, spike files and results all go to
 
 Examples
 --------
+    # scan an experiment as it is: its scale, gains, connectome, neurons,
+    # cytoarchitecture, full-scale rates and master_seed - only eta_ext varies
+    python tools/eta_ext_search.py --experiment experiments/tutorial_CN.py \
+        --method scan --eta-list 4.0 4.5 5.0 5.5
+
     # default: simulate, bisect for the 3-5 Hz excitatory band
     python tools/eta_ext_search.py
 
@@ -72,10 +83,10 @@ Examples
     # 8 GB laptop, noisier but quicker
     python tools/eta_ext_search.py --n-scaling 0.002 --t-sim 1500
 
-    # calibrate for one individual: their connectome and their amyloid map
+    # calibrate for one individual: their connectome (or, better, an
+    # experiment file that sets it, passed with --experiment)
     python tools/eta_ext_search.py \
-        --con-path   ../model/experimental_data/ADNI/AD_SC.mat \
-        --abeta-ratio ../model/experimental_data/ADNI/AD_abeta_ratio.csv
+        --con-path model/experimental_data/amyloid/amyloid_SC.mat
 
     # average three seeds per candidate (slower, much less noisy)
     python tools/eta_ext_search.py --seeds 2903 1234 5678
@@ -93,6 +104,7 @@ import argparse
 import ast
 import json
 import os
+import runpy
 import warnings
 import sys
 import time
@@ -161,74 +173,108 @@ def bootstrap(root):
 
 
 # --------------------------------------------------------------------------- #
-#  Amyloid neuron parameters (only used when --abeta-ratio is given)
-# --------------------------------------------------------------------------- #
-ABETA_E = dict(E_L=-65.0, V_th=-50.0, V_reset=-70.0, C_m=220.0,
-               tau_m=10.0, tau_syn_ex=2.0, tau_syn_in=2.0, t_ref=2.0)
-ABETA_I = dict(E_L=-70.0, V_th=-45.0, V_reset=-70.0, C_m=100.0,
-               tau_m=10.0, tau_syn_ex=2.0, tau_syn_in=2.0, t_ref=2.0)
-NO_SPREAD = {p: {"distribution": "lognormal", "rel_sd": 0.0}
-             for p in ("V_th", "C_m", "tau_m")}
-
-
-# --------------------------------------------------------------------------- #
 #  Network construction
 # --------------------------------------------------------------------------- #
-class NetworkFactory:
-    """Builds the expensive anatomy once and cheap networks per ``eta_ext``."""
+# Used when neither --experiment nor the corresponding flag sets a value
+TOOL_DEFAULTS = {"N_scaling": 0.005, "K_scaling": 0.1, "scaling_type": "sqrt",
+                 "cc_scalingEtoE": 2.5, "cc_scalingEtoI": 5.0, "seeds": [2903]}
 
-    def __init__(self, args, logger):
-        self.args = args
+
+def network_params(args, root, logger):
+    """The complete network configuration every candidate is built from.
+
+    The model defaults, then the experiment file's ``net_params`` (recursively,
+    as the network stage merges them), then any flag given on the command line.
+    Without ``--experiment`` the flags fall back to ``TOOL_DEFAULTS``.  Fills
+    the resolved values back into ``args`` for the printout and the summary.
+    """
+    params = deepcopy(default_net_params.params)
+    if args.experiment is not None:
+        # run in the model directory (bootstrap() has chdir'ed there), so that
+        # paths built on os.getcwd() resolve as they do in the stages
+        exp = runpy.run_path(str(args.experiment))
+        exp_net = exp.get("net_params", {})
+        if exp_net.get("neuron_types"):
+            raise SystemExit(
+                f"{args.experiment.name} declares neuron types "
+                f"({', '.join(exp_net['neuron_types'])}). A pathological experiment "
+                "keeps the drive of its healthy control - recalibrating it would "
+                "pull it back to the healthy working point. Scan the healthy "
+                "control instead.")
+        nested_dict_update(params, exp_net, logger)
+        if args.seeds is None:
+            seed = exp.get("sim_params", {}).get(
+                "master_seed", default_sim_params.params["master_seed"])
+            args.seeds = [int(seed)]
+    elif args.seeds is None:
+        args.seeds = list(TOOL_DEFAULTS["seeds"])
+
+    # A flag wins; without one, an experiment keeps its own value (or the model
+    # default it inherits), and a bare run takes the tool's defaults.
+    flags = {"N_scaling": args.n_scaling, "K_scaling": args.k_scaling,
+             "scaling_type": args.scaling_type,
+             "cc_scalingEtoE": args.cc_e_to_e, "cc_scalingEtoI": args.cc_e_to_i}
+    chosen = {}
+    for key, flag in flags.items():
+        if flag is not None:
+            chosen[key] = flag
+        elif args.experiment is None:
+            chosen[key] = TOOL_DEFAULTS[key]
+    overrides = {k: v for k, v in chosen.items() if not k.startswith("cc_")}
+    cc = {k: v for k, v in chosen.items() if k.startswith("cc_")}
+    if cc:
+        overrides["scaling_factors_recurrent"] = cc
+    if args.con_path is not None:
+        # An individual connectome replaces the group-average one; the file
+        # must have the same variable layout (C_L, C_R, Dist, DK_Names).
+        overrides["predictive_connectomic_params"] = {"con_path": str(args.con_path)}
+    if args.fullscale_rates is not None:
+        overrides["fullscale_rates"] = str(args.fullscale_rates)
+    elif params.get("fullscale_rates") is None:
+        overrides["fullscale_rates"] = str(root / "simulated_data" / "base_theory_rates.pkl")
+    overrides.update(outpath=str(args.outdir / "networks"), mode=args.log_level)
+    nested_dict_update(params, overrides, logger)
+
+    args.n_scaling, args.k_scaling = params["N_scaling"], params["K_scaling"]
+    args.scaling_type = params["scaling_type"]
+    args.cc_e_to_e = params["scaling_factors_recurrent"]["cc_scalingEtoE"]
+    args.cc_e_to_i = params["scaling_factors_recurrent"]["cc_scalingEtoI"]
+    args.con_path = params["predictive_connectomic_params"]["con_path"]
+    args.fullscale_rates = params["fullscale_rates"]
+    return params
+
+
+class NetworkFactory:
+    """Builds the expensive anatomy once and cheap networks per ``eta_ext``.
+
+    ``params`` is the complete configuration (``network_params()``); every
+    candidate is that configuration with only ``eta_ext`` changed.
+    """
+
+    def __init__(self, params, logger):
+        self.params = params
         self.logger = logger
         self._cache: dict[float, Network] = {}
 
-        base = deepcopy(default_net_params.params)
+        # The anatomy is built from the same parameters as every network below:
+        # Network takes its synapse numbers from SN, not from its params, so an
+        # individual connectome only takes effect if SN is built from it.
         t0 = time.time()
         print("building cytoarchitecture and connectome (one-off, ~60 s) ...",
               flush=True)
-        self.NN = NeuronNumbers(surface_area=base["surface_area"],
+        self.NN = NeuronNumbers(surface_area=params["surface_area"],
                                 logger=logger,
-                                **base["cytoarchitecture_params"])
+                                **params["cytoarchitecture_params"])
         self.SN = SynapseNumbers(NN=self.NN, logger=logger,
-                                 **base["predictive_connectomic_params"])
+                                 **params["predictive_connectomic_params"])
+        print(f"  connectome: {params['predictive_connectomic_params']['con_path']}")
         print(f"  done in {time.time() - t0:.0f} s", flush=True)
-
-    def overrides(self, eta):
-        args = self.args
-        o = {
-            "outpath": str(args.outdir / "networks"),
-            "mode": args.log_level,
-            "N_scaling": args.n_scaling,
-            "K_scaling": args.k_scaling,
-            "scaling_type": args.scaling_type,
-            "fullscale_rates": str(args.fullscale_rates),
-            "scaling_factors_recurrent": {"cc_scalingEtoE": args.cc_e_to_e,
-                                          "cc_scalingEtoI": args.cc_e_to_i},
-            "input_params": {"eta_ext": float(eta)},
-            "Abeta": args.abeta_ratio is not None,
-        }
-        if args.con_path is not None:
-            # An individual connectome replaces the group-average one; the file
-            # must have the same variable layout (C_L, C_R, Dist, DK_Names).
-            o["predictive_connectomic_params"] = {"con_path": str(args.con_path)}
-        if args.abeta_ratio is not None:
-            o.update({
-                "Abeta_ratio_E": args.abeta_ratio,
-                "Abeta_ratio_I": 0.0,
-                "neuron_model_Abeta_E": "iaf_psc_exp",
-                "neuron_model_Abeta_I": "iaf_psc_exp",
-                "neuron_params_Abeta_E": ABETA_E,
-                "neuron_params_Abeta_I": ABETA_I,
-                "neuron_param_dist_Abeta_E": NO_SPREAD,
-                "neuron_param_dist_Abeta_I": NO_SPREAD,
-            })
-        return o
 
     def build(self, eta):
         key = round(float(eta), 6)
         if key not in self._cache:
-            params = deepcopy(default_net_params.params)
-            nested_dict_update(params, self.overrides(key), self.logger)
+            params = deepcopy(self.params)
+            params["input_params"]["eta_ext"] = key
             net = Network(self.NN, self.SN, params, logger=self.logger)
             net.dump(params["outpath"])
             self._cache[key] = net
@@ -524,32 +570,28 @@ def parse_pop(text):
     return tuple(parts)
 
 
-def parse_abeta(text):
-    if text is None:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return text            # a CSV path, resolved by helpers/abeta.py
-
-
 def parse_args(argv=None):
     p = argparse.ArgumentParser(
         description="Search for the eta_ext that keeps a downscaled network "
                     "alive.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter)
 
-    g = p.add_argument_group("network scale")
-    g.add_argument("--n-scaling", type=float, default=0.005,
-                   help="fraction of neurons kept")
-    g.add_argument("--k-scaling", type=float, default=0.1,
-                   help="fraction of in-degree kept")
-    g.add_argument("--scaling-type", choices=["sqrt", "linear"], default="sqrt")
-    g.add_argument("--cc-e-to-e", type=float, default=2.5)
-    g.add_argument("--cc-e-to-i", type=float, default=5.0)
-    g.add_argument("--abeta-ratio", type=parse_abeta, default=None,
-                   help="fraction of amyloid-affected E neurons, or a path to "
-                        "an amyloid CSV; omit for a healthy network")
+    g = p.add_argument_group(
+        "network",
+        "The configuration is the model defaults, then --experiment, then these "
+        "flags. Without --experiment, a flag left out takes the default shown in "
+        "brackets.")
+    g.add_argument("--experiment", type=Path, default=None,
+                   help="experiments/<name>.py: scan this experiment, with all "
+                        "its net_params and its master_seed (only eta_ext varies)")
+    g.add_argument("--n-scaling", type=float, default=None,
+                   help="fraction of neurons kept [0.005]")
+    g.add_argument("--k-scaling", type=float, default=None,
+                   help="fraction of in-degree kept [0.1]")
+    g.add_argument("--scaling-type", choices=["sqrt", "linear"], default=None,
+                   help="[sqrt]")
+    g.add_argument("--cc-e-to-e", type=float, default=None, help="[2.5]")
+    g.add_argument("--cc-e-to-i", type=float, default=None, help="[5.0]")
     g.add_argument("--con-path", type=Path, default=None,
                    help="structural connectivity .mat to use instead of the "
                         "group-average one, e.g. an individual's tractography")
@@ -557,8 +599,9 @@ def parse_args(argv=None):
                    help="full-scale population rates (pkl) the DC compensation "
                         "is computed from; they must belong to the configuration "
                         "being calibrated (see tools/fullscale_rates.py). "
-                        "Default: the model's base_theory_rates.pkl, which "
-                        "matches only the repository defaults")
+                        "Default: the experiment's own file, else the model's "
+                        "base_theory_rates.pkl, which matches only "
+                        "eta_ext 1.1 with long-range gains 1.0 / 2.0")
 
     g = p.add_argument_group("simulation")
     g.add_argument("--t-sim", type=float, default=2000.0,
@@ -566,8 +609,9 @@ def parse_args(argv=None):
     g.add_argument("--t-transient", type=float, default=500.0,
                    help="discarded before measuring rates, ms")
     g.add_argument("--threads", type=int, default=4, help="OpenMP threads")
-    g.add_argument("--seeds", type=int, nargs="+", default=[2903],
-                   help="master seeds averaged per candidate")
+    g.add_argument("--seeds", type=int, nargs="+", default=None,
+                   help="master seeds averaged per candidate "
+                        "[the experiment's master_seed; 2903 without --experiment]")
 
     g = p.add_argument_group("search")
     g.add_argument("--method",
@@ -614,10 +658,12 @@ def parse_args(argv=None):
     args = p.parse_args(argv)
     # bootstrap() chdirs into the model directory, so any path given relative to
     # the invocation directory has to be resolved before that happens.
+    if args.experiment is not None:
+        args.experiment = Path(args.experiment).resolve()
+        if not args.experiment.exists():
+            p.error(f"no experiment file {args.experiment}")
     if args.con_path is not None:
         args.con_path = Path(args.con_path).resolve()
-    if isinstance(args.abeta_ratio, str):
-        args.abeta_ratio = str(Path(args.abeta_ratio).resolve())
     if args.model_root is not None:
         args.model_root = Path(args.model_root).resolve()
     if args.fullscale_rates is not None:
@@ -634,8 +680,6 @@ def main(argv=None):
     args = parse_args(argv)
     args.outdir = Path(args.outdir).resolve()
     root = bootstrap(find_model_repo(args.model_root))
-    if args.fullscale_rates is None:
-        args.fullscale_rates = root / "simulated_data" / "base_theory_rates.pkl"
     print(f"model             : {root}")
     print(f"results directory : {args.outdir}")
     (args.outdir / "networks").mkdir(parents=True, exist_ok=True)
@@ -643,11 +687,17 @@ def main(argv=None):
 
     loggers = build_loggers(str(args.outdir / "log" / "eta_search.log"),
                             mode=args.log_level)
-    factory = NetworkFactory(args, loggers[0])
+    params = network_params(args, root, loggers[0])
+    if args.experiment is not None:
+        print(f"experiment        : {args.experiment}")
+    factory = NetworkFactory(params, loggers[0])
 
     print()
     print(f"scale        : N_scaling={args.n_scaling}  "
           f"K_scaling={args.k_scaling}  ({args.scaling_type})")
+    print(f"gains        : cc_scalingEtoE={args.cc_e_to_e}  "
+          f"cc_scalingEtoI={args.cc_e_to_i}")
+    print(f"rates file   : {args.fullscale_rates}")
     print(f"method       : {args.method}"
           f"{'  (scan)' if args.scan and args.method != 'scan' else ''}")
     if args.eval_method == "simulate" and args.method != "analytic":
@@ -676,8 +726,8 @@ def main(argv=None):
         summary["recommended_eta"] = ana["eta"]
         write_outputs(args, pd.DataFrame(), summary)
         print("Analytic estimate only. Verify it with:")
-        print(f"  python tools/eta_ext_search.py --method scan --eta-list "
-              f"{ana['eta']:.2f}")
+        print(f"  python tools/eta_ext_search.py{experiment_flag(args)} "
+              f"--method scan --eta-list {ana['eta']:.2f}")
         return 0
 
     evaluate = Evaluator(factory, args, loggers)
@@ -735,6 +785,10 @@ def main(argv=None):
     return 0
 
 
+def experiment_flag(args):
+    return "" if args.experiment is None else f" --experiment {args.experiment}"
+
+
 def scan_summary(results, args):
     """Best candidate: inside both target bands, else closest to the E midpoint."""
     if results.empty:
@@ -784,7 +838,7 @@ def plot(args, results):
     ax.legend(fontsize=8)
     fig.tight_layout()
     path = args.outdir / "eta_search.png"
-    fig.savefig(path, dpi=150)
+    fig.savefig(path, dpi=120)
     plt.close(fig)
     return path
 
@@ -818,8 +872,8 @@ def finish(args, evaluate, results, summary):
               "correlations;\n      treat its eta_ext as a bracket, not an "
               "answer.")
         if best:
-            print(f"      Verify with:  python tools/eta_ext_search.py "
-                  f"--method scan --eta-list {best['eta']:.2f}")
+            print(f"      Verify with:  python tools/eta_ext_search.py"
+                  f"{experiment_flag(args)} --method scan --eta-list {best['eta']:.2f}")
     if not args.no_plot and not results.empty:
         print(f"\nfigure : {plot(args, results)}")
     print(f"results: {args.outdir / 'eta_search.csv'}")

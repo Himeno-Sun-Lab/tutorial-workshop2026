@@ -17,4 +17,4 @@ figure.figsize     : 3.0, 2.0         ## figure size in inches
 figure.constrained_layout.use : True  ## When True, automatically make plot
                                       ## elements fit on the figure.
 
-figure.dpi         : 300       ## figure dots per inch
+figure.dpi         : 120       ## figure dots per inch

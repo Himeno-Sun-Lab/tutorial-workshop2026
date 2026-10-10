@@ -7,7 +7,7 @@ import yaml
 from dicthash import dicthash
 
 from helpers.lognormal import mu_sigma_lognorm
-from helpers.abeta import normalize_abeta_ratio, resolve_abeta_ratio
+from helpers.neuron_types import BASE_TYPE, POPULATIONS, type_fractions
 
 class Simulation():
     """
@@ -111,383 +111,223 @@ class Simulation():
             }
         nest.SetKernelStatus(kernel_dict)
 
-    def create_populations(self):
+    def _neuron_type_spec(self, name, pop_type):
         """
-        Creates the neuronal populations.
-
-        The neuronal populations are created and the parameters are assigned
-        to them. The initial membrane potential of the neurons is drawn from a
-        normal distribution.
-        """
-        # Create cortical populations.
-        self.rank_logger.info('Memory on rank %d before creating populations: %.2fMB', nest.Rank(), self._getMemoryMB())
-        self.pops = {}
-        pop_file_name = os.path.join(self.data_path, 'population_GIDs.dat')
-        local_num_threads = nest.GetKernelStatus('local_num_threads')
-        with open(pop_file_name, 'w+') as pop_file:
-            for pop, nn in self.net_dict['neuron_numbers'].items():
-                if nn > 0:
-                    if pop[-1] == 'E':
-                        neuron_model_pop = self.net_dict['neuron_model_E']
-                        neuron_params_pop = self.net_dict['neuron_params_E']
-                        nrn_prm_dist_pop = self.net_dict['neuron_param_dist_E']
-                    elif pop[-1] == 'I':
-                        neuron_model_pop = self.net_dict['neuron_model_I']
-                        neuron_params_pop = self.net_dict['neuron_params_I']
-                        nrn_prm_dist_pop = self.net_dict['neuron_param_dist_I']
-                    else:
-                        msg = 'Populations have to be E or I'
-                        self.rank_logger.error(msg)
-                        raise NotImplementedError(msg)
-                    population = nest.Create(neuron_model_pop, nn)
-                    population.set(neuron_params_pop)
-
-                    # Assign DC input
-                    nest.SetStatus(
-                        population, {
-                            'I_e': self.net_dict['dc_drive'].loc[pop]
-                        }
-                    )
-
-                    # population.set(neuron_params_pop)
-                    population.V_m = nest.random.normal(
-                        mean=self.sim_dict['V0_mean'],
-                        std=self.sim_dict['V0_sd']
-                    )
-                    # Neuron parameters
-                    for prm, dist_dict in nrn_prm_dist_pop.items():
-                        if dist_dict['rel_sd'] > 0:
-                            param_dist = dist_dict['distribution']
-                            if param_dist == 'lognormal':
-                                mean_prm = neuron_params_pop[prm]
-                                offset_prm = 0.
-                                if prm == 'V_th':
-                                    mean_prm -= neuron_params_pop['E_L']
-                                    offset_prm += neuron_params_pop['E_L']
-                                assert mean_prm > 0
-                                mu_param, sigma_param = mu_sigma_lognorm(
-                                    mean=mean_prm,
-                                    rel_sd=dist_dict['rel_sd']
-                                )
-                                population.set({prm:
-                                    offset_prm + nest.random.lognormal(
-                                    mean=mu_param,
-                                    std=sigma_param
-                                )})
-                            else:
-                                err_msg = "Parameter distribution "
-                                err_msg += f"{param_dist} not implemented."
-                                self.rank_logger.error(err_msg)
-                                raise NotImplementedError(err_msg)
-
-                    self.pops[pop] = population
-                    pop_file.write('{};{};{}\n'.format(
-                        pop, population[0].get()['global_id'], population[-1].get()['global_id']
-                    ))
-        self.rank_logger.info('Memory on rank %d after creating populations: %.2fMB', nest.Rank(), self._getMemoryMB())
-
-    def _validate_abeta_ratios(self):
-        """
-        Normalizes and validates ``Abeta_ratio_E`` / ``Abeta_ratio_I``.
-
-        Each may be a scalar fraction, a (possibly nested) dict keyed by area
-        and optionally layer, or a path string to a CSV (see :mod:`helpers.abeta`).
-        Any CSV path is loaded and the value is replaced in ``net_dict`` with the
-        canonical scalar/dict form. Raises and logs on an unsupported type or an
-        out-of-range fraction.
-        """
-        area_list = self.net_dict.get('area_list')
-        layer_list = self.net_dict.get('layer_list')
-        for param_name in ('Abeta_ratio_E', 'Abeta_ratio_I'):
-            self.net_dict[param_name] = normalize_abeta_ratio(
-                self.net_dict[param_name], param_name,
-                area_list=area_list, layer_list=layer_list,
-                logger=self.rank_logger,
-            )
-
-    def _abeta_ratio_for_pop(self, pop):
-        """
-        Resolves the effective amyloid fraction for a single population.
+        Returns model, parameters and parameter distribution of a neuron type.
 
         Parameters
         ----------
-        pop : tuple
-            ``(area, layer, population)`` index, where ``population`` is
+        name : str
+            Name of a type in ``net_dict['neuron_types']`` or ``BASE_TYPE``.
+        pop_type : str
             ``'E'`` or ``'I'``.
 
         Returns
         -------
-        float
-            The fraction of amyloid-affected neurons for this population.
+        neuron_model : str
+        neuron_params : dict
+        param_dist : dict
         """
-        area, layer = pop[0], pop[1]
-        if pop[-1] == 'E':
-            ratio_cfg = self.net_dict['Abeta_ratio_E']
-        elif pop[-1] == 'I':
-            ratio_cfg = self.net_dict['Abeta_ratio_I']
-        else:
+        if pop_type not in POPULATIONS:
             msg = 'Populations have to be E or I'
             self.rank_logger.error(msg)
             raise NotImplementedError(msg)
-        return resolve_abeta_ratio(ratio_cfg, area, layer)
+        if name == BASE_TYPE:
+            spec = self.net_dict
+        else:
+            spec = self.net_dict['neuron_types'][name]
+        return (spec['neuron_model_' + pop_type],
+                spec['neuron_params_' + pop_type],
+                spec['neuron_param_dist_' + pop_type])
 
-    def create_populations_Abeta(self):
+    def _split_population(self, pop, nn):
         """
-        Creates neuronal populations with amyloid-affected neurons
-        """
+        Splits a population into its neuron types.
 
-        # ==================== 内存监控和初始化 ====================
+        Parameters
+        ----------
+        pop : tuple
+            ``(area, layer, population)`` index.
+        nn : int
+            Number of neurons in the population.
+
+        Returns
+        -------
+        list of (str, int)
+            ``(name, number)`` for every custom type in declaration order,
+            followed by the remaining ``BASE_TYPE`` neurons.
+        """
+        nn = int(nn)
+        parts = []
+        assigned = 0
+        fractions = type_fractions(
+            self.net_dict.get('neuron_types', {}), pop[0], pop[1], pop[-1])
+        for name, frac in fractions:
+            n = min(int(np.round(nn * frac)), nn - assigned)
+            parts.append((name, n))
+            assigned += n
+        parts.append((BASE_TYPE, nn - assigned))
+        return parts
+
+    def _type_dc(self, pop, name):
+        """
+        DC input of the neurons of one type in a population.
+
+        Returns
+        -------
+        float or None
+            The entry of ``net_dict['dc_drive_types']``, or None for the base
+            neurons and when the network has no per-type DC (no downscaling),
+            in which case the population's ``dc_drive`` applies.
+        """
+        dc_types = self.net_dict.get('dc_drive_types')
+        if name == BASE_TYPE or dc_types is None or name not in dc_types:
+            return None
+        return float(dc_types.loc[pop, name])
+
+    def _set_param_dist(self, nodes, neuron_params, param_dist):
+        """
+        Draws neuron parameters from their distributions.
+
+        Parameters
+        ----------
+        nodes : NodeCollection
+            Neurons to set the parameters of.
+        neuron_params : dict
+            Mean parameters of the neurons.
+        param_dist : dict
+            ``{param: {'distribution': str, 'rel_sd': float}}``
+        """
+        for prm, dist_dict in param_dist.items():
+            if dist_dict['rel_sd'] > 0:
+                param_dist = dist_dict['distribution']
+                if param_dist == 'lognormal':
+                    mean_prm = neuron_params[prm]
+                    offset_prm = 0.
+                    if prm == 'V_th':
+                        mean_prm -= neuron_params['E_L']
+                        offset_prm += neuron_params['E_L']
+                    assert mean_prm > 0
+                    mu_param, sigma_param = mu_sigma_lognorm(
+                        mean=mean_prm,
+                        rel_sd=dist_dict['rel_sd']
+                    )
+                    nodes.set({prm:
+                        offset_prm + nest.random.lognormal(
+                        mean=mu_param,
+                        std=sigma_param
+                    )})
+                else:
+                    err_msg = "Parameter distribution "
+                    err_msg += f"{param_dist} not implemented."
+                    self.rank_logger.error(err_msg)
+                    raise NotImplementedError(err_msg)
+
+    def create_populations(self):
+        """
+        Creates the neuronal populations.
+
+        Every population is split into the neuron types given in
+        ``net_dict['neuron_types']`` (in declaration order) and the remaining
+        base neurons. The parts are created one after another, so each
+        population occupies one contiguous GID range, and receive the
+        parameters of their type. DC input and the initial membrane potential,
+        drawn from a normal distribution, are assigned to the whole population.
+
+        Writes ``population_GIDs.dat`` (``pop;minGID;maxGID``) and
+        ``neuron_type_GIDs.dat`` (``pop;type;minGID;maxGID;count``, one row per
+        non-empty type of every population, base neurons included).
+        """
         self.rank_logger.info('Memory on rank %d before creating populations: %.2fMB', nest.Rank(), self._getMemoryMB())
-
-        # 校验Abeta_ratio配置（标量或按脑区/层的字典），不合法则抛出异常并记录日志
-        self._validate_abeta_ratios()
-
-        # 初始化群体字典和统计变量
         self.pops = {}
-        processed_populations = 0
-        total_abeta_neurons = 0
-        
-        # ==================== 文件设置 ====================
+        type_totals = {}
+        pop_rows = []
+        type_rows = []
+        for pop, nn in self.net_dict['neuron_numbers'].items():
+            if nn > 0:
+                # Create the neuron types one after another
+                parts = []
+                for name, n in self._split_population(pop, nn):
+                    if n > 0:
+                        neuron_model, neuron_params, param_dist = \
+                            self._neuron_type_spec(name, pop[-1])
+                        nodes = nest.Create(neuron_model, n)
+                        nodes.set(neuron_params)
+                        parts.append((name, nodes, neuron_params, param_dist))
+                        type_totals[name] = type_totals.get(name, 0) + n
+                        type_rows.append((pop, name, nodes[0].global_id,
+                                          nodes[-1].global_id, n))
+                population = parts[0][1]
+                for _, nodes, _, _ in parts[1:]:
+                    population = population + nodes
+
+                # Assign DC input; neuron types with their own synaptic time
+                # constants have their own downscaling compensation
+                nest.SetStatus(
+                    population, {
+                        'I_e': self.net_dict['dc_drive'].loc[pop]
+                    }
+                )
+                for name, nodes, _, _ in parts:
+                    dc = self._type_dc(pop, name)
+                    if dc is not None:
+                        nodes.set({'I_e': dc})
+
+                population.V_m = nest.random.normal(
+                    mean=self.sim_dict['V0_mean'],
+                    std=self.sim_dict['V0_sd']
+                )
+                # Neuron parameters
+                for _, nodes, neuron_params, param_dist in parts:
+                    self._set_param_dist(nodes, neuron_params, param_dist)
+
+                self.rank_logger.debug(
+                    '[%s] total=%d | %s', pop, nn,
+                    ' | '.join('{}={}'.format(name, len(nodes))
+                               for name, nodes, _, _ in parts))
+
+                self.pops[pop] = population
+                pop_rows.append((pop, population[0].global_id,
+                                 population[-1].global_id))
+
+        if nest.Rank() == 0:
+            self._write_gid_files(pop_rows, type_rows)
+        if self.logger:
+            self.logger.info(
+                'Created %d populations: %s', len(self.pops),
+                ', '.join('{} {}'.format(n, name)
+                          for name, n in type_totals.items()))
+        self.rank_logger.info('Memory on rank %d after creating populations: %.2fMB', nest.Rank(), self._getMemoryMB())
+
+    def _write_gid_files(self, pop_rows, type_rows):
+        """
+        Writes the GID ranges of populations and neuron types.
+
+        Parameters
+        ----------
+        pop_rows : list of tuple
+            ``(pop, minGID, maxGID)`` per population.
+        type_rows : list of tuple
+            ``(pop, type, minGID, maxGID, count)`` per neuron type and
+            population.
+        """
         pop_file_name = os.path.join(self.data_path, 'population_GIDs.dat')
-        abeta_file_name = os.path.join(self.data_path, 'Abeta_GIDs.dat')
-        
-        # 计算总群体数量用于进度监控
-        total_populations = len([pop for pop, nn in self.net_dict['neuron_numbers'].items() if nn > 0])
-        
-        # ==================== 优化的双文件写入主循环 ====================
-        # 使用行缓冲模式，每行立即写入磁盘
-        with open(pop_file_name, 'w+', buffering=1) as pop_file, \
-            open(abeta_file_name, 'w+', buffering=1) as abeta_file:
-            # if nest.Rank() == 0:
-            #     # 写入Aβ文件头部信息
-            #     abeta_file.write('# Abeta-affected neurons Global IDs for Alzheimer\'s Disease Simulation\n')
-            #     abeta_file.write('# Generated by NEST simulator on SLURM cluster\n')
-            #     abeta_file.write('# Format: Population_Name;Start_GID;End_GID;Neuron_Count\n')
-            
-            # 定义刷新间隔（适合集群环境）
-            FLUSH_INTERVAL = max(1, total_populations // 20)  # 每5%进度刷新一次
-            MEMORY_CHECK_INTERVAL = max(1, total_populations // 10)  # 每10%检查内存
-            
-            # 遍历所有神经元群体
-            for pop, nn in self.net_dict['neuron_numbers'].items():
-                if nn > 0:  # 只处理有神经元的群体
-                    
-                    # ==================== 神经元类型识别和参数加载 ====================
-                    if pop[-1] == 'E':  # 兴奋性神经元
-                        # 正常兴奋性神经元参数
-                        neuron_model_pop = self.net_dict['neuron_model_E']
-                        neuron_params_pop = self.net_dict['neuron_params_E']
-                        nrn_prm_dist_pop = self.net_dict['neuron_param_dist_E']
-                        
-                        # Aβ影响的兴奋性神经元参数
-                        neuron_model_pop_Abeta = self.net_dict["neuron_model_Abeta_E"]
-                        neuron_params_pop_Abeta = self.net_dict['neuron_params_Abeta_E']
-                        nrn_prm_dist_pop_Abeta = self.net_dict['neuron_param_dist_Abeta_E']
-
-                    elif pop[-1] == 'I':  # 抑制性神经元
-                        # 正常抑制性神经元参数
-                        neuron_model_pop = self.net_dict['neuron_model_I']
-                        neuron_params_pop = self.net_dict['neuron_params_I']
-                        nrn_prm_dist_pop = self.net_dict['neuron_param_dist_I']
-
-                        # Aβ影响的抑制性神经元参数
-                        neuron_model_pop_Abeta = self.net_dict["neuron_model_Abeta_I"]
-                        neuron_params_pop_Abeta = self.net_dict['neuron_params_Abeta_I']
-                        nrn_prm_dist_pop_Abeta = self.net_dict['neuron_param_dist_Abeta_I']
-                        
-                    else:
-                        msg = 'Populations have to be E or I'
-                        self.rank_logger.error(msg)
-                        raise NotImplementedError(msg)
-
-                    # ==================== 神经元数量计算 ====================
-                    # 按脑区/层解析当前群体的Aβ比例（支持标量或嵌套字典配置）
-                    Abeta_ratio = self._abeta_ratio_for_pop(pop)
-                    nn_Abeta = int(np.round(nn * Abeta_ratio))  # 受Aβ影响的神经元数量
-                    nn_normal = int(nn - nn_Abeta)             # 正常神经元数量
-                    total_abeta_neurons += nn_Abeta
-                    
-                    # ==================== 分别创建两类神经元群体 ====================
-                    created_populations = []  # 存储创建的子群体
-
-                    # 创建受Aβ影响的神经元（如果数量大于0）
-                    if nn_Abeta > 0:
-                        pop_Abeta = nest.Create(neuron_model_pop_Abeta, nn_Abeta)
-                        pop_Abeta.set(neuron_params_pop_Abeta)
-                        created_populations.append(pop_Abeta)
-
-                        # 立即记录Aβ影响神经元的GID信息（行缓冲会立即写入）
-                        abeta_file.write('{};{};{};{}\n'.format(
-                            pop,                                    # 群体名称
-                            pop_Abeta[0].get()['global_id'],       # 起始GID
-                            pop_Abeta[-1].get()['global_id'],      # 结束GID
-                            nn_Abeta                               # 神经元数量
-                        ))
-
-                    # 创建正常神经元（如果数量大于0）
-                    if nn_normal > 0:
-                        pop_normal = nest.Create(neuron_model_pop, nn_normal)
-                        pop_normal.set(neuron_params_pop)
-                        created_populations.append(pop_normal)
-
-                    # 每个群体一行 DEBUG：GID 范围在创建后一并记录
-                    self.rank_logger.debug(
-                        '[%s] total=%d | Abeta=%d (GID %s-%s) | normal=%d (GID %s-%s) | ratio=%.2f',
-                        pop, nn,
-                        nn_Abeta,
-                        pop_Abeta[0].get()['global_id']  if nn_Abeta  > 0 else '-',
-                        pop_Abeta[-1].get()['global_id'] if nn_Abeta  > 0 else '-',
-                        nn_normal,
-                        pop_normal[0].get()['global_id']  if nn_normal > 0 else '-',
-                        pop_normal[-1].get()['global_id'] if nn_normal > 0 else '-',
-                        Abeta_ratio,
-                    )
-                    
-                    # ==================== 合并群体 ====================
-                    if created_populations:
-                        if len(created_populations) == 2:
-                            population = created_populations[0] + created_populations[1]  # Aβ + 正常
-                        else:
-                            population = created_populations[0]  # 只有一种类型
-                    else:
-                        continue  # 如果没有创建任何神经元，跳过此群体
-                    
-                    # ==================== 直流驱动设置 ====================
-                    nest.SetStatus(
-                        population, {
-                            'I_e': self.net_dict['dc_drive'].loc[pop]
-                        }
-                    )
-                    
-                    # ==================== 膜电位初始化 ====================
-                    population.V_m = nest.random.normal(
-                        mean=self.sim_dict['V0_mean'],
-                        std=self.sim_dict['V0_sd']
-                    )
-                    
-                    # ==================== 参数分布设置 ====================
-                    # 1. 为Aβ影响的神经元设置参数分布
-                    if nn_Abeta > 0:
-                        for prm, dist_dict in nrn_prm_dist_pop_Abeta.items():
-                            if dist_dict['rel_sd'] > 0:
-                                param_dist = dist_dict['distribution']
-                                if param_dist == 'lognormal':
-                                    mean_prm = neuron_params_pop_Abeta[prm]
-                                    offset_prm = 0.
-                                    if prm == 'V_th':
-                                        mean_prm -= neuron_params_pop_Abeta['E_L']
-                                        offset_prm += neuron_params_pop_Abeta['E_L']
-                                    assert mean_prm > 0
-                                    mu_param, sigma_param = mu_sigma_lognorm(
-                                        mean=mean_prm,
-                                        rel_sd=dist_dict['rel_sd']
-                                    )
-                                    pop_Abeta.set({prm:
-                                        offset_prm + nest.random.lognormal(
-                                        mean=mu_param,
-                                        std=sigma_param
-                                    )})
-                                else:
-                                    self.rank_logger.error(
-                                        'Parameter distribution %s not implemented for Abeta neurons.', param_dist)
-                                    raise NotImplementedError(
-                                        'Parameter distribution %s not implemented for Abeta neurons.' % param_dist)
-
-                    # 2. 为正常神经元设置参数分布
-                    if nn_normal > 0:
-                        for prm, dist_dict in nrn_prm_dist_pop.items():
-                            if dist_dict['rel_sd'] > 0:
-                                param_dist = dist_dict['distribution']
-                                if param_dist == 'lognormal':
-                                    mean_prm = neuron_params_pop[prm]
-                                    offset_prm = 0.
-                                    if prm == 'V_th':
-                                        mean_prm -= neuron_params_pop['E_L']
-                                        offset_prm += neuron_params_pop['E_L']
-                                    assert mean_prm > 0
-                                    mu_param, sigma_param = mu_sigma_lognorm(
-                                        mean=mean_prm,
-                                        rel_sd=dist_dict['rel_sd']
-                                    )
-                                    pop_normal.set({prm:
-                                        offset_prm + nest.random.lognormal(
-                                        mean=mu_param,
-                                        std=sigma_param
-                                    )})
-                                else:
-                                    self.rank_logger.error(
-                                        'Parameter distribution %s not implemented for normal neurons.', param_dist)
-                                    raise NotImplementedError(
-                                        'Parameter distribution %s not implemented for normal neurons.' % param_dist)
-
-                    # ==================== 群体存储和记录 ====================
-                    self.pops[pop] = population
-                    if nest.Rank() == 0:
-                        # 立即记录整个群体的信息（行缓冲会立即写入）
-                        pop_file.write('{};{};{}\n'.format(
-                            pop,                                        # 群体名称
-                            population[0].get()['global_id'],          # 群体起始GID
-                            population[-1].get()['global_id']          # 群体结束GID
-                        ))
-                    
-                    # ==================== 进度监控和缓冲区管理 ====================
-                    processed_populations += 1
-                    
-                    # 定期强制刷新缓冲区（适合长时间运行的SLURM作业）
-                    if processed_populations % FLUSH_INTERVAL == 0:
-                        pop_file.flush()
-                        abeta_file.flush()
-                        progress_pct = 100 * processed_populations / total_populations
-                        self.rank_logger.info(
-                            'Network build progress: %d/%d (%.1f%%), Abeta neurons so far: %d',
-                            processed_populations, total_populations, progress_pct, total_abeta_neurons)
-                    
-                    # 定期内存检查（防止内存溢出导致SLURM作业被杀）
-                    # if processed_populations % MEMORY_CHECK_INTERVAL == 0:
-                    #     current_memory = self._getMemoryMB()
-                    #     print(f'[内存监控] Rank {nest.Rank()}: {current_memory:.2f}MB, '
-                    #         f'平均每个群体: {current_memory/processed_populations:.2f}MB')
-                        
-                    #     # 如果内存使用过高，发出警告
-                    #     if current_memory > 50000:  # 50GB警告阈值
-                    #         print(f'警告: 内存使用较高 ({current_memory:.2f}MB), 请监控SLURM作业状态')
-            
-            # 最终刷新确保所有数据写入磁盘
-            pop_file.flush()
-            abeta_file.flush()
-        
-        # ==================== 最终统计和验证 ====================
-        final_memory = self._getMemoryMB()
-        total_neurons = sum(len(pop) for pop in self.pops.values())
-        # if self.logger:
-        #     self.logger.info(
-        #         "AD network ready: %d pops | %d neurons total "
-        #         "(Abeta %.1f%% = %d, normal %.1f%% = %d)",
-        #         len(self.pops), total_neurons,
-        #         100 * total_abeta_neurons / total_neurons, total_abeta_neurons,
-        #         100 * (total_neurons - total_abeta_neurons) / total_neurons,
-        #         total_neurons - total_abeta_neurons,
-        #     )
-            # self.logger.info('GID files: %s | %s', pop_file_name, abeta_file_name)
-        self.rank_logger.debug('Memory on rank %d after creating populations: %.2fMB',
-            nest.Rank(), final_memory)
-
-        # 验证文件是否正确写入
-        try:
-            with open(pop_file_name, 'r') as f:
-                pop_lines = len(f.readlines())
-            with open(abeta_file_name, 'r') as f:
-                abeta_lines = len([l for l in f.readlines() if not l.startswith('#')])
-            if self.logger:
-                self.logger.debug('File check: population_GIDs.dat has %d rows, Abeta_GIDs.dat has %d records',
-                    pop_lines, abeta_lines)
-        except Exception as e:
-            if self.logger:
-                self.logger.error('File check failed: %s', e)
+        with open(pop_file_name, 'w') as pop_file:
+            for row in pop_rows:
+                pop_file.write('{};{};{}\n'.format(*row))
+        type_file_name = os.path.join(self.data_path, 'neuron_type_GIDs.dat')
+        with open(type_file_name, 'w') as type_file:
+            for row in type_rows:
+                type_file.write('{};{};{};{};{}\n'.format(*row))
 
     def create_populations_pos(self):
         """
         Creates spatially-positioned populations for topographic mapping.
+
+        Every population is created as a grid of base neurons. For each neuron
+        type a random, disjoint subset of the grid then receives the
+        parameters of that type; NEST cannot change the model of existing
+        nodes, so a type's model has to equal the base model here.
 
         TODO: Topographic mapping is out of scope for now. This method is not
         exercised by the default pipeline (``topographic_mapping`` defaults to
@@ -496,203 +336,85 @@ class Simulation():
         self.rank_logger.info('Memory on rank %d before creating populations: %.2fMB',
             nest.Rank(), self._getMemoryMB())
 
-        # 校验Abeta_ratio配置（标量或按脑区/层的字典），不合法则抛出异常并记录日志
-        self._validate_abeta_ratios()
-
         self.pops = {}
-        processed_populations = 0
-        total_abeta_neurons = 0
-        
+        pop_rows = []
+        type_rows = []
         random_seed_generator = np.random.default_rng(seed=self.sim_dict["master_seed"])
 
-        # ==================== 文件设置 ====================
-        pop_gid_fn = os.path.join(self.data_path, 'population_GIDs.dat')
-        abeta_gid_fn = os.path.join(self.data_path, 'Abeta_GIDs.dat')
-        total_populations = len([pop for pop, nn in self.net_dict['neuron_numbers'].items() if nn > 0])
-        
-        # ==================== 优化的双文件写入主循环 ====================
-        # 使用行缓冲模式，每行立即写入磁盘
-        with open(pop_gid_fn, 'w+', buffering=1) as pop_file, \
-            open(abeta_gid_fn, 'w+', buffering=1) as abeta_file:
-            
-            # 定义刷新间隔（适合集群环境）
-            FLUSH_INTERVAL = max(1, total_populations // 20)  # 每5%进度刷新一次
-            MEMORY_CHECK_INTERVAL = max(1, total_populations // 10)  # 每10%检查内存
-            
-            # 遍历所有神经元群体
-            for pop, nn in self.net_dict['neuron_numbers'].items():
-                pos_fn = os.path.join(self.data_path, pop[0] + ".dat") 
-                with open(pos_fn, "w+") as pos_f:
-                    if nn > 0:  # 只处理有神经元的群体
-                        if pop[-1] == 'E':  # 兴奋性神经元
-                            # 正常兴奋性神经元参数
-                            neuron_model_pop = self.net_dict['neuron_model_E']
-                            neuron_params_pop = self.net_dict['neuron_params_E']
-                            nrn_prm_dist_pop = self.net_dict['neuron_param_dist_E']
-                            
-                            # Aβ影响的兴奋性神经元参数
-                            neuron_model_pop_Abeta = self.net_dict["neuron_model_Abeta_E"]
-                            neuron_params_pop_Abeta = self.net_dict['neuron_params_Abeta_E']
-                            nrn_prm_dist_pop_Abeta = self.net_dict['neuron_param_dist_Abeta_E']
+        for pop, nn in self.net_dict['neuron_numbers'].items():
+            if nn > 0:
+                neuron_model_pop, neuron_params_pop, nrn_prm_dist_pop = \
+                    self._neuron_type_spec(BASE_TYPE, pop[-1])
 
-                        elif pop[-1] == 'I':  # 抑制性神经元
-                            # 正常抑制性神经元参数
-                            neuron_model_pop = self.net_dict['neuron_model_I']
-                            neuron_params_pop = self.net_dict['neuron_params_I']
-                            nrn_prm_dist_pop = self.net_dict['neuron_param_dist_I']
+                shape = self.generate_shape(pop, nn)
+                center = [0., 0., self.net_dict["thickness"].loc[pop[:-1]] / 2]
+                extent = [1., 1., 2.]
 
-                            # Aβ影响的抑制性神经元参数
-                            neuron_model_pop_Abeta = self.net_dict["neuron_model_Abeta_I"]
-                            neuron_params_pop_Abeta = self.net_dict['neuron_params_Abeta_I']
-                            nrn_prm_dist_pop_Abeta = self.net_dict['neuron_param_dist_Abeta_I']
-                        
-                        else:
-                            msg = 'Populations have to be E or I'
-                            self.rank_logger.error(msg)
-                            raise NotImplementedError(msg)
+                pop_grid = nest.Create(neuron_model_pop, positions=nest.spatial.grid(shape=shape, center=center, extent=extent))
+                pop_grid.set(neuron_params_pop)
+                head = pop_grid[0].global_id
+                tail = pop_grid[-1].global_id
+                nn_grid = shape[0] * shape[1] * shape[2]
 
-                        # ==================== 神经元数量计算 ====================
-                        shape = self.generate_shape(pop, nn)
-                        center = [0., 0., self.net_dict["thickness"].loc[pop[:-1]] / 2]
-                        extent = [1., 1., 2.]
-                        
-                        pop_grid = nest.Create(neuron_model_pop, positions=nest.spatial.grid(shape=shape, center=center, extent=extent))
-                        head = pop_grid[0].get()["global_id"]
-                        tail = pop_grid[-1].get()["global_id"]
-                        nn_grid = shape[0] * shape[1] * shape[2]
+                nest.SetStatus(
+                    pop_grid, {
+                        'I_e': self.net_dict['dc_drive'].loc[pop]
+                    }
+                )
+                pop_grid.V_m = nest.random.normal(
+                    mean=self.sim_dict['V0_mean'],
+                    std=self.sim_dict['V0_sd']
+                )
 
-                        # 按脑区/层解析当前群体的Aβ比例（支持标量或嵌套字典配置）
-                        Abeta_ratio = self._abeta_ratio_for_pop(pop)
-                        nn_Abeta_grid = int(np.round(nn_grid * Abeta_ratio))
-                        random_id_generator = np.random.default_rng(seed=int(random_seed_generator.uniform(0, 1) * 1000))
-                        Abeta_GIDs = head + random_id_generator.choice(nn_grid, size=nn_Abeta_grid, replace=False)
-                        Abeta_GIDs.sort()
-                        self.rank_logger.debug('Abeta_GIDs: %s', Abeta_GIDs)
-                        pop_Abeta = nest.NodeCollection(Abeta_GIDs.tolist())
-                        pop_Abeta.set(neuron_model_pop_Abeta)
-                        if nn_Abeta_grid > 0:
-                            abeta_file.write('{};{};{};{}\n'.format(
-                                pop,                                                                    # 群体名称
-                                Abeta_GIDs                                                              # 神经元GID列表
-                            ))
-                        
-                        # ==================== 直流驱动设置 ====================
-                        nest.SetStatus(
-                            pop_grid, {
-                                'I_e': self.net_dict['dc_drive'].loc[pop]
-                            }
-                        )
-                        
-                        # ==================== 膜电位初始化 ====================
-                        pop_grid.V_m = nest.random.normal(
-                            mean=self.sim_dict['V0_mean'],
-                            std=self.sim_dict['V0_sd']
-                        )
-                        
-                        # ==================== 参数分布设置 ====================
-                        if nn_grid > 0:
-                            for prm, dist_dict in nrn_prm_dist_pop.items():
-                                if dist_dict['rel_sd'] > 0:
-                                    param_dist = dist_dict['distribution']
-                                    if param_dist == 'lognormal':
-                                        mean_prm = neuron_params_pop[prm]
-                                        offset_prm = 0.
-                                        if prm == 'V_th':
-                                            mean_prm -= neuron_params_pop['E_L']
-                                            offset_prm += neuron_params_pop['E_L']
-                                        assert mean_prm > 0
-                                        mu_param, sigma_param = mu_sigma_lognorm(
-                                            mean=mean_prm,
-                                            rel_sd=dist_dict['rel_sd']
-                                        )
-                                        pop_grid.set({prm:
-                                            offset_prm + nest.random.lognormal(
-                                            mean=mu_param,
-                                            std=sigma_param
-                                        )})
-                                    else:
-                                        err_msg = f"Parameter distribution {param_dist} not implemented for normal neurons."
-                                        self.rank_logger.error(err_msg)
-                                        raise NotImplementedError(err_msg)
+                # Randomly assign disjoint subsets of the grid to the types
+                random_id_generator = np.random.default_rng(seed=int(random_seed_generator.uniform(0, 1) * 1000))
+                order = head + random_id_generator.permutation(nn_grid)
+                start = 0
+                is_base = np.ones(nn_grid, dtype=bool)
+                for name, n in self._split_population(pop, nn_grid):
+                    if name == BASE_TYPE or n == 0:
+                        continue
+                    neuron_model, neuron_params, param_dist = \
+                        self._neuron_type_spec(name, pop[-1])
+                    if neuron_model != neuron_model_pop:
+                        msg = ('Topographic mapping requires neuron type {} to '
+                               'use the base model {}.'.format(name, neuron_model_pop))
+                        self.rank_logger.error(msg)
+                        raise NotImplementedError(msg)
+                    gids = np.sort(order[start:start + n])
+                    start += n
+                    is_base[gids - head] = False
+                    nodes = nest.NodeCollection(gids.tolist())
+                    nodes.set(neuron_params)
+                    dc = self._type_dc(pop, name)
+                    if dc is not None:
+                        nodes.set({'I_e': dc})
+                    self._set_param_dist(nodes, neuron_params, param_dist)
+                    type_rows.append((pop, name, gids.tolist()))
+                base_gids = head + np.flatnonzero(is_base)
+                if base_gids.size:
+                    self._set_param_dist(
+                        nest.NodeCollection(base_gids.tolist()),
+                        neuron_params_pop, nrn_prm_dist_pop)
 
-                        if nn_Abeta_grid > 0:
-                            for prm, dist_dict in nrn_prm_dist_pop_Abeta.items():
-                                if dist_dict['rel_sd'] > 0:
-                                    param_dist = dist_dict['distribution']
-                                    if param_dist == 'lognormal':
-                                        mean_prm = neuron_params_pop_Abeta[prm]
-                                        offset_prm = 0.
-                                        if prm == 'V_th':
-                                            mean_prm -= neuron_params_pop_Abeta['E_L']
-                                            offset_prm += neuron_params_pop_Abeta['E_L']
-                                        assert mean_prm > 0
-                                        mu_param, sigma_param = mu_sigma_lognorm(
-                                            mean=mean_prm,
-                                            rel_sd=dist_dict['rel_sd']
-                                        )
-                                        pop_Abeta.set({prm:
-                                            offset_prm + nest.random.lognormal(
-                                            mean=mu_param,
-                                            std=sigma_param
-                                        )})
-                                    else:
-                                        err_msg = f"Parameter distribution {param_dist} not implemented for Abeta neurons."
-                                        self.rank_logger.error(err_msg)
-                                        raise NotImplementedError(err_msg)
+                self.pops[pop] = pop_grid
+                pop_rows.append((pop, head, tail))
 
-                        # ==================== 群体存储和记录 ====================
-                        self.pops[pop] = pop_grid
-                        if nest.Rank() == 0:
-                            # 立即记录整个群体的信息（行缓冲会立即写入）
-                            pop_file.write('{};{};{}\n'.format(
-                                pop,
-                                head,
-                                tail,
-                                nn_grid
-                            ))
-                        
-                        # ==================== 进度监控和缓冲区管理 ====================
-                        processed_populations += 1
-                        
-                        # 定期强制刷新缓冲区（适合长时间运行的SLURM作业）
-                        if processed_populations % FLUSH_INTERVAL == 0:
-                            pop_file.flush()
-                            abeta_file.flush()
-                            progress_pct = 100 * processed_populations / total_populations
-                            print(f'[SLURM进度监控] 阿尔茨海默病网络构建进度: {processed_populations}/{total_populations} '
-                                f'({progress_pct:.1f}%), 累积Aβ神经元: {total_abeta_neurons}')
-            
-            # 最终刷新确保所有数据写入磁盘
-            pop_file.flush()
-            abeta_file.flush()
-        
-        # ==================== 最终统计和验证 ====================
-        final_memory = self._getMemoryMB()
-        total_neurons = sum(len(pop) for pop in self.pops.values())
+        if nest.Rank() == 0:
+            pop_file_name = os.path.join(self.data_path, 'population_GIDs.dat')
+            with open(pop_file_name, 'w') as pop_file:
+                for row in pop_rows:
+                    pop_file.write('{};{};{}\n'.format(*row))
+            # Types are scattered over the grid, so their GIDs are listed
+            # explicitly instead of as ranges.
+            type_file_name = os.path.join(self.data_path, 'neuron_type_GIDs_pos.dat')
+            with open(type_file_name, 'w') as type_file:
+                for row in type_rows:
+                    type_file.write('{};{};{}\n'.format(*row))
         if self.logger:
-            self.logger.info("Alzheimer's Disease Brain Network Created")
-            self.logger.info('Created %d populations', len(self.pops))
-            self.logger.info('Neurons in total: %d', total_neurons)
-            self.logger.info('Amyloid-affected neurons: %d (%.2f%%)',
-                total_abeta_neurons, 100 * total_abeta_neurons / total_neurons)
-            self.logger.info('Normal neurons: %d (%.2f%%)',
-                total_neurons - total_abeta_neurons, 100 * (total_neurons - total_abeta_neurons) / total_neurons)
-            self.logger.info('Memory at Rank %d: %.2fMB', nest.Rank(), final_memory)
-            self.logger.info('Population GIDs: %s', pop_gid_fn)
-            self.logger.info('Amyloid GIDs: %s', abeta_gid_fn)
-
-        # 验证文件是否正确写入
-        try:
-            with open(pop_gid_fn, 'r') as f:
-                pop_lines = len(f.readlines())
-            with open(abeta_gid_fn, 'r') as f:
-                abeta_lines = len([l for l in f.readlines() if not l.startswith('#')])
-            if self.logger:
-                self.logger.info('File check: population_GIDs.dat has %d rows, Abeta_GIDs.dat has %d records',
-                    pop_lines, abeta_lines)
-        except Exception as e:
-            if self.logger:
-                self.logger.warning('File check failed: %s', e)
+            self.logger.info('Created %d spatial populations', len(self.pops))
+        self.rank_logger.info('Memory on rank %d after creating populations: %.2fMB',
+            nest.Rank(), self._getMemoryMB())
 
     def generate_shape(self, pop_name, nn_pop):
         """
@@ -1029,8 +751,6 @@ class Simulation():
         # needs revisiting before this branch can be relied upon.
         if self.net_dict['topographic_mapping']:
             self.create_populations_pos()
-        elif self.net_dict["Abeta"]:
-            self.create_populations_Abeta()
         else:
             self.create_populations()
         self.create_devices()

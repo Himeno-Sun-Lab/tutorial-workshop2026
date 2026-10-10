@@ -27,35 +27,50 @@ net_params = {
     # N_scaling of the neurons and K_scaling of the in-degree; synapses (and so
     # memory) scale as the product. K_scaling is the one that changes the
     # dynamics, so we keep it at the value the project validates and shrink
-    # N_scaling instead. See Part 3 of the notebook.
-    "N_scaling": 0.005,      # 17 k neurons
+    # N_scaling instead. See Appendix A of the notebook.
+    "N_scaling": 0.01,        # 34.7 k neurons, 4.3e7 synapses (~5.9 GB)
     "K_scaling": 0.1,        # in-degree ~1250 instead of ~12500
     "scaling_type": "sqrt",  # weights scale as 1/sqrt(K_scaling)
 
-    # Mean-field rates of the full-scale model, needed to compute the DC current
-    # that compensates the mean drive lost by downscaling. Required whenever
-    # N_scaling or K_scaling differ from 1.
-    "fullscale_rates": "./simulated_data/base_theory_rates.pkl",
+    # Rates of the full-scale version of THIS experiment. The sqrt weight rule
+    # preserves the variance of the synaptic input but keeps only sqrt(K_scaling)
+    # of its mean; the rest is restored as a DC current computed from these
+    # rates. They must match every parameter below (drive, weights, pathology),
+    # so they were generated for this file by self-consistent iteration:
+    #   python tools/fullscale_rates.py experiments/tutorial_CN.py --iters 40 \
+    #       --out experiments/fullscale_rates/tutorial_CN.pkl
+    # (the default 10 iterations stop short of the fixed point at this scale)
+    # Re-run that whenever you change eta_ext, the weights or the anatomy.
+    # Required whenever N_scaling or K_scaling differ from 1.
+    "fullscale_rates": os.path.join(_HERE, "fullscale_rates", "tutorial_CN.pkl"),
 
     # ---- external drive ---------------------------------------------------
     # eta_ext = mean external input as a multiple of the distance to threshold.
-    # 1.1 is the calibrated FULL-SCALE value; a downscaled network needs more,
-    # because the sqrt weight rule preserves input variance but not its mean.
-    # 3.45 was measured with tools/eta_ext_search.py for exactly this N/K, and
-    # puts the network at E ~3.0 Hz, I ~12.1 Hz.
-    "input_params": {"eta_ext": 3.45},
+    # 1.1 is the repository default and the drive of the full-scale runs
+    # (notebook Part 6). The downscaled network does not reproduce the
+    # full-scale working point at the same drive (notebook Appendix A.5): at 1.1
+    # it sits at E ~0.3 Hz, so its drive is calibrated on its own. Of the scan
+    # 4.5 / 5.0 / 5.5, only 5.0 holds both target bands (4.5: E 2.3 Hz; 5.5:
+    # I 17.9 Hz), and puts the network at E ~3.5 Hz, I ~13.4 Hz - which is the
+    # state the fullscale_rates file above holds (E mean 3.54 Hz, I mean
+    # 13.41 Hz, 26 damped iterations at this drive), so the two must be
+    # changed together: the DC compensation is computed from those rates, and
+    # pairing them with a weaker drive leaves every neuron ~50 mV below
+    # threshold and the network silent after the transient.
+    "input_params": {"eta_ext": 5.0},
 
     # ---- connection strength ----------------------------------------------
     # Cortico-cortical excitatory weights, relative to the local ones. These two
     # are the main knobs the project uses to move the network between a quiet
-    # ground state and a metastable one.
+    # ground state and a metastable one. 2.5 / 5.0 equals the repository
+    # default; it is set here so that the control panel shows it.
     "scaling_factors_recurrent": {
         "cc_scalingEtoE": 2.5,
         "cc_scalingEtoI": 2.0 * 2.5,
     },
 
     # ---- pathology --------------------------------------------------------
-    "Abeta": False,          # healthy control; see tutorial_AD.py
+    # No neuron_types: healthy control; see tutorial_amyloid.py
 }
 
 
@@ -64,9 +79,9 @@ net_params = {
 # ===========================================================================
 sim_params = {
     # Biological time, in ms. The first second is discarded as a transient, so
-    # this leaves 4 s of usable signal - enough for spectra above ~2 Hz, not
+    # this leaves 3 s of usable signal - enough for spectra above ~2 Hz, not
     # enough for BOLD. Cluster runs use tens of seconds.
-    "t_sim": 5000.0,
+    "t_sim": 4000.0,
 
     # Seeds connectivity, weights, delays, the Poisson background and the
     # initial membrane potentials. Change it and you get a different sample of
@@ -105,15 +120,19 @@ ana_params = {
     # (slower) version built from raw spike times.
     "fast_lfp_kernel": True,
 
-    # Figure resolution. The default 600 dpi produces very large PNGs.
+    # Figure resolution of every figure the analysis stage writes.
     "dpi": 120,
 
-    "functconn_corr": {"exclude_diagonal": False},
+    "functconn_corr": {"exclude_diagonal": True},
 
-    # Raster window: the last second of the run. At this population size a small
-    # sample is too sparse to look like a raster, so show half of every
-    # population.
-    "plotRasterArea": {"fraction": 0.5, "low": 4000, "high": 5000},
+    # Raster window: the last second of the run, derived from t_sim so that the
+    # two cannot drift apart. At this population size a small sample is too
+    # sparse to look like a raster, so show half of every population. The bounds
+    # must be ints: the analysis stage rejects a value whose type differs from
+    # its default (500 / 750).
+    "plotRasterArea": {"fraction": 0.5,
+                       "low": int(sim_params["t_sim"]) - 1000,
+                       "high": int(sim_params["t_sim"])},
 
     "meanFiringRate":          {"t_start": _TRANSIENT},
     "individualFiringRate":    {"t_start": _TRANSIENT},

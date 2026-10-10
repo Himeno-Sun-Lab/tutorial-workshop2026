@@ -9,8 +9,9 @@ current computed from the rates of the *full-scale* network
 (``net_params["fullscale_rates"]``).  Those rates must belong to the very
 configuration being run -- same weights, drive, connectome and neuron
 parameters.  The model's ``simulated_data/base_theory_rates.pkl`` matches only
-the repository defaults (``eta_ext = 1.1``, ``cc_scalingEtoE = 1``,
-``cc_scalingEtoI = 2``).
+``eta_ext = 1.1`` with HuMAM's original long-range gains
+(``cc_scalingEtoE = 1``, ``cc_scalingEtoI = 2``), not the repository defaults
+(2.5 / 5.0).
 
 With the compensation in place the downscaled network approximates the
 full-scale one, so the full-scale rates are the fixed point of
@@ -101,6 +102,13 @@ def main(argv=None):
     ees.nested_dict_update(params, exp["net_params"], loggers[0])
     params["outpath"] = str(args.workdir / "networks")
     params["mode"] = "WARNING"
+    if args.eta is not None and params.get("neuron_types"):
+        # Rates at another drive only serve to recalibrate eta_ext, and a
+        # pathological experiment keeps the drive of its healthy control.
+        sys.exit(f"{args.experiment.name} declares neuron types "
+                 f"({', '.join(params['neuron_types'])}): its full-scale rates "
+                 "belong to its own eta_ext, taken from its healthy control. "
+                 "--eta is for calibrating the healthy control; omit it here.")
     if args.eta is not None:
         params["input_params"]["eta_ext"] = float(args.eta)
     eta = params["input_params"]["eta_ext"]

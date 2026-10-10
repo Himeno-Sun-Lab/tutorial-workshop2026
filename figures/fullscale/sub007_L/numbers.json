@@ -1,0 +1,156 @@
+{
+  "switch_detected": {
+    "t": 4400,
+    "rate_ratio": 3.991056819253891
+  },
+  "states": {
+    "t_switch": 4400,
+    "quiet_episodes": [
+      [
+        4420,
+        10000
+      ]
+    ],
+    "quiet_fraction": 0.62,
+    "changes": 1,
+    "intervals": {
+      "active": [
+        [
+          1000,
+          4420
+        ]
+      ],
+      "quiet": [
+        [
+          4520,
+          10000
+        ]
+      ]
+    }
+  },
+  "info": {
+    "N_scaling": "1.0",
+    "K_scaling": "1.0",
+    "scaling_type": "linear",
+    "neurons": "3468839",
+    "internal synapses": "4.28e+10",
+    "eta_ext": "1.1",
+    "cc_scalingEtoE / EtoI": "2.5 / 5.0",
+    "neuron types": "none",
+    "connectome": "sub007_L.mat",
+    "t_sim (ms)": "10000.0",
+    "master_seed": "2903",
+    "network hash": "bb385659393a7823c969de04be750b04",
+    "simulation hash": "34574788f935bb5edb888e616bf56d55",
+    "analysis hash": "da97a17d061adb6b3f4b223af5b671ba"
+  },
+  "whole_run": {
+    "E": 0.9961917769932714,
+    "I": 3.369136049437427
+  },
+  "rates_active": {
+    "E": 1.9648713094849235,
+    "I": 6.224730824141908,
+    "silent": 12,
+    "fastest": 63.17731829573935
+  },
+  "rates_quiet": {
+    "E": 0.40275979635652376,
+    "I": 1.6185111141679591,
+    "silent": 0,
+    "fastest": 7.662880277155734
+  },
+  "drop": {
+    "n_areas": 13,
+    "first": [
+      "pericalcarine",
+      "cuneus",
+      "insula"
+    ],
+    "first_t": 4.3675,
+    "spread_ms": 50.00000000000071,
+    "spread80_ms": 36.99999999999992,
+    "no_drop": [
+      "bankssts",
+      "caudalanteriorcingulate",
+      "entorhinal",
+      "frontalpole",
+      "fusiform",
+      "inferiortemporal",
+      "isthmuscingulate",
+      "lateraloccipital",
+      "lateralorbitofrontal",
+      "lingual",
+      "medialorbitofrontal",
+      "middletemporal",
+      "parahippocampal",
+      "parsorbitalis",
+      "parstriangularis",
+      "rostralanteriorcingulate",
+      "rostralmiddlefrontal",
+      "superiorfrontal",
+      "superiortemporal",
+      "temporalpole",
+      "transversetemporal"
+    ]
+  },
+  "raster_areas": [
+    "postcentral",
+    "pericalcarine",
+    "caudalanteriorcingulate"
+  ],
+  "raster_window": [
+    2900,
+    5900
+  ],
+  "stats_active": {
+    "median": {
+      "rate": {
+        "E": 0.061,
+        "I": 2.201
+      },
+      "cv": {
+        "E": 0.748,
+        "I": 0.732
+      },
+      "cc": {
+        "E": 0.011,
+        "I": 0.01
+      }
+    },
+    "pops_rate_above_10": 36,
+    "max_rate": 63.17731829573935,
+    "pops_cv_above_1_2": 15,
+    "pops_cc_above_0_1": 39,
+    "max_cc": 0.8772959382824664
+  },
+  "stats_quiet": {
+    "median": {
+      "rate": {
+        "E": 0.135,
+        "I": 1.05
+      },
+      "cv": {
+        "E": 0.764,
+        "I": 0.74
+      },
+      "cc": {
+        "E": 0.001,
+        "I": -0.0
+      }
+    },
+    "pops_rate_above_10": 0,
+    "max_rate": 7.662880277155734,
+    "pops_cv_above_1_2": 0,
+    "pops_cc_above_0_1": 0,
+    "max_cc": 0.01526432102659995
+  },
+  "fc": {
+    "whole": 0.4661209163447347,
+    "active": 0.15151915214084358,
+    "quiet": 0.20092690366291194,
+    "sim_mean": 0.7566291907279006,
+    "exp__sim_syn__corr_rh": 0.46612091634473496,
+    "exp__sim_bold__corr_rh": 0.05508558741170637
+  }
+}

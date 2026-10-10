@@ -24,11 +24,42 @@ import seaborn as sns
 from dicthash import dicthash
 
 from helpers.resting_state_networks import left_ordering
-from helpers.abeta import resolve_abeta_ratio, abeta_ratio_is_zero
+from helpers.neuron_types import BASE_TYPE, active_neuron_types, type_fractions
 
 from joblib import Parallel, delayed
 import multiprocessing
 from multiprocessing import Pool
+
+def safe_corrcoef(a, b):
+    """Pearson correlation of two flattened connectivity triangles, or NaN.
+
+    ``np.corrcoef`` fails with an opaque "inhomogeneous shape" ValueError when
+    the two inputs have different lengths, which happens as soon as one of the
+    two connectivity matrices contains NaNs: a silent network gives every area a
+    constant synaptic input current, so its correlation matrix is all-NaN and the
+    vector extracted from it is empty. Such a run has no functional connectivity
+    to report - NaN is the answer, not a crash halfway through the stage.
+    """
+    a = np.asarray(a, dtype=float)
+    b = np.asarray(b, dtype=float)
+    if a.size != b.size or a.size < 2:
+        return np.nan
+    if not (np.isfinite(a).all() and np.isfinite(b).all()):
+        return np.nan
+    if a.std() == 0 or b.std() == 0:
+        return np.nan
+    return np.corrcoef(a, b)[0, 1]
+
+
+def _nan_diagonal(df):
+    """Copy of a square DataFrame with NaN on its diagonal.
+
+    Unlike ``np.fill_diagonal(df.values, np.nan)`` this neither modifies the
+    input (which may be a cached result) nor depends on ``.values`` being a
+    writable view, which it is not under pandas' copy-on-write.
+    """
+    return df.mask(np.eye(len(df), dtype=bool))
+
 
 def timeit(method):
     def timed(*args, **kw):
@@ -76,9 +107,6 @@ class Analysis():
         self.popGids = self._readPopGids()
         self.logger.info('Reading spikes')
         self.spikes = self._readSpikes()
-        # if self.net_dict["Abeta"]:
-        #     self.logger.info('Reading Abeta-popGids')
-        #     self.AbetaGids = self._readAbetaPopGids()
         if "I_syn" in self.sim_dict["rec_dev"]:
             self.logger.info('Reading post-synaptic currents')
             self.I_syn = self._readIsyn()
@@ -89,23 +117,112 @@ class Analysis():
         os.makedirs(path, exist_ok=True)
         return path
 
-    def _abeta_active(self):
+    def _active_neuron_types(self):
         """
-        Whether the network actually contains amyloid-affected neurons.
+        Names of the custom neuron types the network actually contains.
 
-        True only if the ``Abeta`` flag is set *and* at least one population has
-        a non-zero Abeta ratio. When ``Abeta`` is enabled but every ratio
-        resolves to 0 (scalar 0, an all-zero dict, or both E and I disabled) no
-        Abeta neurons were created, so the analysis must behave as the plain
-        (non-Abeta) case — otherwise it would read an empty Abeta GID file or
-        blend a redundant kernel.
+        A type whose ratios resolve to 0 everywhere created no neurons, so the
+        analysis must treat it as absent - otherwise it would plot an empty
+        type raster or blend a redundant kernel.
         """
-        if not self.net_dict.get('Abeta', False):
-            return False
-        return not (
-            abeta_ratio_is_zero(self.net_dict.get('Abeta_ratio_E', 0.0))
-            and abeta_ratio_is_zero(self.net_dict.get('Abeta_ratio_I', 0.0))
-        )
+        return active_neuron_types(self.net_dict.get('neuron_types'))
+
+    def _populationParam(self, area, layer, pop, key):
+        """
+        Neuron parameter of a population, averaged over its neuron types.
+
+        Parameters
+        ----------
+        area, layer, pop : str
+            Population.
+        key : str
+            Neuron parameter, e.g. ``'t_ref'``.
+
+        Returns
+        -------
+        float
+            ``sum_t f_t * p_t`` over the neuron types and the base neurons,
+            weighted by their fractions in the population.
+        """
+        neuron_types = self.net_dict.get('neuron_types') or {}
+        base = self.net_dict['neuron_params_' + pop][key]
+        value, f_base = 0.0, 1.0
+        for name, f in type_fractions(neuron_types, area, layer, pop):
+            value += f * neuron_types[name]['neuron_params_' + pop].get(key, base)
+            f_base -= f
+        return value + f_base * base
+
+    def _psc_kernel(self, area, layer, pop, synapse_key, dt):
+        """
+        Charge kernel of the synapses onto one population.
+
+        ``tau_syn_ex`` / ``tau_syn_in`` are parameters of the *receiving*
+        neuron, so the kernel of ``(area, layer, pop)`` mixes the kernels of its
+        neuron types, weighted by their fractions; the base neurons take the
+        remaining fraction. Every kernel is scaled by its time constant (the
+        charge a unit-amplitude PSC delivers), so that the postsynaptic current
+        is ``convolve(weighted_rate, kernel, mode='same')``.
+
+        Parameters
+        ----------
+        area, layer, pop : str
+            Target population.
+        synapse_key : str
+            ``'tau_syn_ex'`` or ``'tau_syn_in'``.
+        dt : float
+            Time step of the signal the kernel is applied to (ms).
+
+        Returns
+        -------
+        kernel : ndarray
+            Centred on t = 0, as ``kernel_for_psc``.
+        """
+        neuron_types = self.net_dict.get('neuron_types') or {}
+        tau_n = self.net_dict['neuron_params_' + pop][synapse_key]
+        mix = []
+        for name, f in type_fractions(neuron_types, area, layer, pop):
+            tau_t = neuron_types[name]['neuron_params_' + pop].get(synapse_key, tau_n)
+            if f > 0.0 and tau_t != tau_n:
+                mix.append((f, tau_t))
+        if not mix:
+            return tau_n * kernel_for_psc(tau_n, dt)
+
+        # Kernels of different tau are only aligned on a common, centred grid.
+        parts = [(1.0 - sum(f for f, _ in mix), tau_n)] + mix
+        t_max = 10 * max(tau for _, tau in parts)
+        t_ker = np.arange(-t_max, t_max, dt)
+        kernel = np.zeros_like(t_ker)
+        for f, tau in parts:
+            k = np.exp(-t_ker / tau) / tau
+            k[t_ker < -dt / 2] = 0  # causal
+            kernel += f * tau * k / k.sum()
+        return kernel
+
+    def _filterInputRates(self, weighted_rates, synapse_key, dt):
+        """
+        Postsynaptic currents from weighted presynaptic rates.
+
+        Parameters
+        ----------
+        weighted_rates : DataFrame
+            Rows are target populations, columns time; each row is
+            ``sum_j J_ij K_ij nu_j`` over the sources of one synapse type.
+        synapse_key : str
+            ``'tau_syn_ex'`` or ``'tau_syn_in'``.
+        dt : float
+            Time step of the columns (ms).
+
+        Returns
+        -------
+        currents : DataFrame
+            Same shape as ``weighted_rates``.
+        """
+        out = np.empty(weighted_rates.shape)
+        for i, (area, layer, pop) in enumerate(weighted_rates.index):
+            kernel = self._psc_kernel(area, layer, pop, synapse_key, dt)
+            out[i] = convolve(weighted_rates.values[i], kernel, mode='same')
+        return pd.DataFrame(out, index=weighted_rates.index,
+                            columns=weighted_rates.columns)
 
     @timeit
     def fullAnalysis(self):
@@ -194,9 +311,9 @@ class Analysis():
         for area in self.popGids.index.levels[0]:
             self.logger.info('Plotting %s', area)
             self.plotRasterArea(area)
-            if self._abeta_active():
-                self.logger.info('Plotting Abeta-affected nodes %s', area)
-                self.plotRasterAbetaArea(area)
+            if self._active_neuron_types():
+                self.logger.info('Plotting neuron types %s', area)
+                self.plotRasterNeuronTypeArea(area)
             self.logger.info('Plotting %s LFP proxy', area)
             self.plotLfpArea(area)
             self.logger.info('Plotting %s LFP PSD', area)
@@ -478,44 +595,34 @@ class Analysis():
             weights = self.net_dict['weights'].loc[index, index]
             synapses = self.net_dict['synapses_internal'].loc[index, index]
             indeg = synapses.div(NN, axis=0)
-            tau_s_ex_E = self.net_dict['neuron_params_E']['tau_syn_ex']
-            tau_s_in_E = self.net_dict['neuron_params_E']['tau_syn_in']
-            tau_s_ex_I = self.net_dict['neuron_params_I']['tau_syn_ex']
-            tau_s_in_I = self.net_dict['neuron_params_I']['tau_syn_in']
-            assert (tau_s_ex_E == tau_s_ex_I) and (tau_s_in_E == tau_s_in_I)
-            tau_syn_ex = tau_s_ex_E
-            tau_syn_in = tau_s_in_E
-            dt = self.sim_dict['sim_resolution']
             binsize = self.ana_dict['rate_histogram']['binsize']
+            # The kernel is applied to the rate histogram, so it must be
+            # sampled at the histogram's bin width, not at sim_resolution.
+            dt = binsize
             t_start = 0.
             t_stop = self.ana_dict['rate_histogram']['t_stop']
             if t_stop is None:
                 t_stop = self.sim_dict['t_sim']
 
-            kernel_syn_in = kernel_for_psc(tau_syn_in, dt)
-            kernel_syn_ex = kernel_for_psc(tau_syn_ex, dt)
-
             t_in = np.arange(t_start, t_stop, binsize)
+            rates = pd.DataFrame(dict(inst_rates.items()), index=t_in).T
 
-            # Apply convolution to all firing rates emitted from a particular
-            # population. Depending on whether the population is excitatory or
-            # inhibitory different kernels with different synaptic time
-            # constants are used. The results are the postynaptic currents
-            # originating in a particular population.
-            tmp = {}
-            for (area, layer, population), dat in inst_rates.items():
-                if population == 'E':
-                    tau_s = tau_syn_ex
-                    kernel = kernel_syn_ex
-                else:
-                    tau_s = tau_syn_in
-                    kernel = kernel_syn_in
-                tmp[(area, layer, population)] = convolve(tau_s*dat, kernel,
-                                                          mode='same')
-            pscs = pd.DataFrame(tmp, index=t_in).T
+            # Weighted input rates per target, separately for excitatory and
+            # inhibitory sources, convolved with the kernel of the target's
+            # synapses: tau_syn is a parameter of the receiving neuron, mixed
+            # over its neuron types. The results are the postsynaptic currents.
+            w_abs = weights.abs() * indeg
+            is_E = rates.index.get_level_values(-1) == 'E'
+            curr = (
+                self._filterInputRates(
+                    w_abs.loc[:, rates.index[is_E]].dot(rates.loc[is_E]),
+                    'tau_syn_ex', dt)
+                + self._filterInputRates(
+                    w_abs.loc[:, rates.index[~is_E]].dot(rates.loc[~is_E]),
+                    'tau_syn_in', dt)
+            )
 
-            # Include weights, indegrees and average
-            curr = (weights.abs() * indeg).dot(pscs)
+            # Average over the areas
             curr = curr.mul(NN, axis=0).groupby(level=0).sum()
             curr = curr.div(NN.groupby(level=0).sum(), axis=0)
             curr.to_pickle(os.path.join(
@@ -820,13 +927,18 @@ class Analysis():
             t_start = self.ana_dict['lvr']['t_start']
             t_stop = self.ana_dict['lvr']['t_stop']
             min_spikes = self.ana_dict['lvr']['min_spikes']
-            t_ref_E = self.net_dict['neuron_params_E']['t_ref']
-            t_ref_I = self.net_dict['neuron_params_I']['t_ref']
-            # TODO different refractory periods
-            assert(t_ref_E == t_ref_I)
-            t_ref = t_ref_E
-            lv = self.spikes.apply(LV, args=(t_ref, t_start, t_stop,
-                                             min_spikes))
+            # Every neuron with the refractory period of its neuron type.
+            # Without spike-train GIDs (shell-based reader) a population of
+            # several types falls back to their fraction-weighted mean.
+            gids = self._spikeGids()
+            lv = pd.Series([
+                LV(sts,
+                   self._neuronParam(area, layer, pop, gids.loc[(area, layer, pop)], 't_ref')
+                   if gids is not None else
+                   self._populationParam(area, layer, pop, 't_ref'),
+                   t_start, t_stop, min_spikes)
+                for (area, layer, pop), sts in self.spikes.items()
+            ], index=self.spikes.index, dtype=float)
             lv.to_pickle(os.path.join(self.sim_folder, 'lv.pkl'))
         return lv
 
@@ -1118,37 +1230,9 @@ class Analysis():
                     e, exc_info=True)
             raise
 
-        is_abeta = self._abeta_active()
-
-        def _effective_kernel(pop_type, synapse_key, dt, area, layer):
-            """Weighted exponential kernel; handles Abeta mixed populations.
-
-            The Abeta fraction may be configured per area/layer, so it is
-            resolved for the specific ``(area, layer)`` of the population.
-            """
-            if pop_type == 'E':
-                tau_n     = self.net_dict['neuron_params_E'][synapse_key]
-                ratio_cfg = self.net_dict.get('Abeta_ratio_E', 0.0)
-                tau_a     = self.net_dict.get('neuron_params_Abeta_E', {}).get(synapse_key, tau_n)
-            else:
-                tau_n     = self.net_dict['neuron_params_I'][synapse_key]
-                ratio_cfg = self.net_dict.get('Abeta_ratio_I', 0.0)
-                tau_a     = self.net_dict.get('neuron_params_Abeta_I', {}).get(synapse_key, tau_n)
-            f = resolve_abeta_ratio(ratio_cfg, area, layer) if is_abeta else 0.0
-
-            k_n = kernel_for_psc(tau_n, dt)
-            if f == 0.0 or tau_a == tau_n:
-                return tau_n, k_n
-
-            k_a = kernel_for_psc(tau_a, dt)
-            n   = max(len(k_n), len(k_a))
-            k_n = np.pad(k_n, (0, n - len(k_n)))
-            k_a = np.pad(k_a, (0, n - len(k_a)))
-            return (1 - f) * tau_n + f * tau_a, (1 - f) * k_n + f * k_a
-
-        # --- Build PSC time series per source population ---
+        # --- Population rates per source population ---
         try:
-            pscs = {}
+            src_rates = {}
 
             if fast:
                 sample = next(iter(self.rate_hist))
@@ -1171,9 +1255,7 @@ class Analysis():
                         raise ValueError(
                             'rate_hist length inconsistency at %s/%s/%s: '
                             'got %d bins, expected %d' % (area, layer, pop, len(dat), n_bins))
-                    synapse_key     = 'tau_syn_ex' if pop == 'E' else 'tau_syn_in'
-                    tau_eff, kernel = _effective_kernel(pop, synapse_key, dt_lfp, area, layer)
-                    pscs[(area, layer, pop)] = convolve(tau_eff * dat, kernel, mode='same')
+                    src_rates[(area, layer, pop)] = np.asarray(dat, dtype=float)
 
             else:
                 n_bins  = int(round(t_sim / sim_dt))
@@ -1207,34 +1289,27 @@ class Analysis():
 
                     spike_train, _ = np.histogram(flat_spikes, bins=t_edges)
                     # Convert counts to firing rate in Hz
-                    rate = spike_train.astype(float) / (n_neurons * sim_dt * 1e-3)
-
-                    synapse_key     = 'tau_syn_ex' if pop == 'E' else 'tau_syn_in'
-                    tau_eff, kernel = _effective_kernel(pop, synapse_key, sim_dt, area, layer)
-                    pscs[(area, layer, pop)] = convolve(tau_eff * rate, kernel, mode='same')
+                    src_rates[(area, layer, pop)] = (
+                        spike_train.astype(float) / (n_neurons * sim_dt * 1e-3))
 
         except (KeyError, ValueError, TypeError) as e:
             if self.logger:
                 self.logger.error(
-                    'calc_lfp_proxy_kernel: PSC computation failed: %s', e, exc_info=True)
+                    'calc_lfp_proxy_kernel: rate computation failed: %s', e, exc_info=True)
             raise
 
-        # Validate uniform PSC length across all populations
-        psc_lengths = set(len(v) for v in pscs.values())
-        if len(psc_lengths) > 1:
-            msg = ('calc_lfp_proxy_kernel: inconsistent PSC array lengths across '
-                   'populations: %s' % {k: len(v) for k, v in pscs.items()})
-            if self.logger:
-                self.logger.error(msg)
-            raise ValueError(msg)
-
-        pscs_df = pd.DataFrame(pscs, index=t).T   # (n_pops, n_timesteps)
+        rates_df = pd.DataFrame(src_rates, index=t).T   # (n_pops, n_timesteps)
 
         # --- E/I current separation ---
+        # Weighted input rates per target, then one convolution per target with
+        # the kernel of the target's synapses (tau_syn belongs to the receiving
+        # neuron, and is mixed over its neuron types).
         try:
             w_signed = weights * indeg
-            I_ex = w_signed.clip(lower=0).dot(pscs_df)   # positive (E sources)
-            I_in = w_signed.clip(upper=0).dot(pscs_df)   # negative (I sources)
+            I_ex = self._filterInputRates(
+                w_signed.clip(lower=0).dot(rates_df), 'tau_syn_ex', dt_lfp)  # positive (E sources)
+            I_in = self._filterInputRates(
+                w_signed.clip(upper=0).dot(rates_df), 'tau_syn_in', dt_lfp)  # negative (I sources)
         except Exception as e:
             if self.logger:
                 self.logger.error(
@@ -1345,6 +1420,67 @@ class Analysis():
                              corr.shape[0], corr.shape[1])
         return corr
 
+    def _bandCoherence(self, signals, fs, cfg_key):
+        """
+        Pairwise magnitude-squared coherence, averaged over [fmin, fmax].
+
+        Welch PSDs and cross-spectral densities share one segment length,
+        ``ana_dict[cfg_key]['nperseg']`` samples; None takes 500 ms segments,
+        i.e. a resolution of 2 Hz whatever the sampling rate.  (scipy's default
+        of 256 samples is 25.6 ms at 0.1 ms resolution: 39 Hz bins, of which
+        only 39, 78 and 117 Hz fall into a 0-120 Hz band.)
+
+        Parameters
+        ----------
+        signals : ndarray, shape (N, n_t)
+        fs : float
+            Sampling frequency in Hz.
+        cfg_key : str
+            Entry of ``ana_dict`` holding ``fmin``, ``fmax`` and ``nperseg``.
+
+        Returns
+        -------
+        coh_matrix : ndarray, shape (N, N)
+            Ones on the diagonal.
+        """
+        cfg  = self.ana_dict[cfg_key]
+        fmin = cfg['fmin']
+        fmax = cfg['fmax']
+        n_t  = signals.shape[1]
+        nperseg = cfg.get('nperseg')
+        if nperseg is None:
+            nperseg = int(round(0.5 * fs))  # 500 ms
+        nperseg = min(int(nperseg), n_t)
+
+        # Pre-compute Welch PSD for every signal once, reuse per pair
+        f_ref, _ = welch(signals[0], fs=fs, nperseg=nperseg)
+        band = (f_ref >= fmin) & (f_ref <= fmax)
+        if self.logger:
+            self.logger.info(
+                '%s: nperseg=%d (%.0f ms), df=%.2f Hz, %d bins in [%g, %g] Hz '
+                '(%.1f-%.1f Hz), %d segments', cfg_key, nperseg,
+                1000. * nperseg / fs, fs / nperseg, band.sum(), fmin, fmax,
+                f_ref[band].min() if band.any() else np.nan,
+                f_ref[band].max() if band.any() else np.nan,
+                max(1, (n_t - nperseg // 2) // (nperseg - nperseg // 2)))
+            if fmax > fs / 2:
+                self.logger.warning('%s: fmax=%g Hz lies above the Nyquist '
+                                    'frequency %g Hz', cfg_key, fmax, fs / 2)
+            if band.sum() < 2:
+                self.logger.warning('%s: only %d frequency bin(s) in the band; '
+                                    'lower nperseg or widen [fmin, fmax]',
+                                    cfg_key, band.sum())
+        psds = [welch(s, fs=fs, nperseg=nperseg)[1] for s in signals]
+
+        N = len(signals)
+        coh_matrix = np.ones((N, N))
+        for i in range(N):
+            for j in range(i + 1, N):
+                _, Pxy = csd(signals[i], signals[j], fs=fs, nperseg=nperseg)
+                Cxy = np.abs(Pxy[band]) ** 2 / (psds[i][band] * psds[j][band])
+                coh_matrix[i, j] = coh_matrix[j, i] = Cxy.mean()
+        return coh_matrix
+
     @timeit
     def calcAreaLfpCoherence(self):
         """
@@ -1378,8 +1514,6 @@ class Analysis():
             roi = self.calcAreaLfp()
 
         tmin = self.ana_dict['calcAreaLfpCoherence']['tmin']
-        fmin = self.ana_dict['calcAreaLfpCoherence']['fmin']
-        fmax = self.ana_dict['calcAreaLfpCoherence']['fmax']
 
         z = roi.loc[:, roi.columns >= tmin]
 
@@ -1393,21 +1527,8 @@ class Analysis():
         dt = z.columns.values[1] - z.columns.values[0]   # ms
         fs = 1000. / dt                                    # Hz
 
-        areas   = z.index.tolist()
-        signals = z.values        # (N, n_t)
-        N       = len(areas)
-
-        # Pre-compute Welch PSD for every area once, reuse per pair
-        f_ref, _ = welch(signals[0], fs=fs)
-        band = (f_ref >= fmin) & (f_ref <= fmax)
-        psds = [welch(s, fs=fs)[1] for s in signals]
-
-        coh_matrix = np.ones((N, N))
-        for i in range(N):
-            for j in range(i + 1, N):
-                _, Pxy = csd(signals[i], signals[j], fs=fs)
-                Cxy = np.abs(Pxy[band]) ** 2 / (psds[i][band] * psds[j][band])
-                coh_matrix[i, j] = coh_matrix[j, i] = Cxy.mean()
+        areas      = z.index.tolist()
+        coh_matrix = self._bandCoherence(z.values, fs, 'calcAreaLfpCoherence')
 
         coherence = pd.DataFrame(coh_matrix, index=areas, columns=areas)
         coherence.to_pickle(os.path.join(self.ana_folder, 'lfp_area_coherence.pkl'))
@@ -1454,8 +1575,6 @@ class Analysis():
                     self.logger.error(msg)
                 raise FileNotFoundError(msg)
         tmin = self.ana_dict['calcLfpCoherence']['tmin']
-        fmin = self.ana_dict['calcLfpCoherence']['fmin']
-        fmax = self.ana_dict['calcLfpCoherence']['fmax']
 
         z = self.lfp.loc[:, self.lfp.columns >= tmin]
         dt = z.columns.values[1] - z.columns.values[0]   # ms
@@ -1464,21 +1583,9 @@ class Analysis():
         # Each row is one (area, layer) signal; index order is area-first
         # (preserved from groupby in calc_lfp_proxy / calc_lfp_proxy_kernel)
         index_pairs = list(z.index)   # [(area, layer), ...]
-        signals     = z.values        # (N, n_t)
-        N           = len(index_pairs)
-
-        # Pre-compute Welch PSD for every signal once
-        f_ref, _ = welch(signals[0], fs=fs)
-        band = (f_ref >= fmin) & (f_ref <= fmax)
-        psds = [welch(s, fs=fs)[1] for s in signals]
 
         # Full N×N coherence — includes both same-layer and cross-layer pairs
-        coh_matrix = np.ones((N, N))
-        for i in range(N):
-            for j in range(i + 1, N):
-                _, Pxy = csd(signals[i], signals[j], fs=fs)
-                Cxy = np.abs(Pxy[band]) ** 2 / (psds[i][band] * psds[j][band])
-                coh_matrix[i, j] = coh_matrix[j, i] = Cxy.mean()
+        coh_matrix = self._bandCoherence(z.values, fs, 'calcLfpCoherence')
 
         mi = pd.MultiIndex.from_tuples(index_pairs, names=['area', 'layer'])
         result = pd.DataFrame(coh_matrix, index=mi, columns=mi)
@@ -2897,14 +3004,9 @@ class Analysis():
     def _load_experimental_fc(self):
         """
         Load the experimental functional connectivity selected by
-        ``ana_dict['experimental_fc']``.
+        ``ana_dict['experimental_fc']``, averaged over its participants.
 
-        The sentinel value ``'rsDATA_7T_DKparcel.npy'`` (the default) selects
-        the group-averaged Senden 7T resting-state data shipped in
-        ``experimental_data/senden/rsData_7T_DKparcel/``; the per-participant
-        correlation matrices are averaged over all participants. Any other
-        value is taken as a path to a single subject's ``.npy`` file and is
-        read through :meth:`personalFunctionalConnectivity`.
+        See :meth:`_load_experimental_fc_subjects` for the accepted sources.
 
         Returns
         -------
@@ -2913,6 +3015,32 @@ class Analysis():
             experimental data could not be found.
         areas : ndarray or None
             The 34 Desikan Killiany area names, or None alongside exp_fc.
+        """
+        subjects, areas = self._load_experimental_fc_subjects()
+        if subjects is None:
+            return None, None
+        exp_fc = {hemi: sum(fc[hemi] for fc in subjects) / len(subjects)
+                  for hemi in ('lh', 'rh')}
+        return exp_fc, areas
+
+    def _load_experimental_fc_subjects(self):
+        """
+        Load the experimental functional connectivity selected by
+        ``ana_dict['experimental_fc']``, one matrix pair per participant.
+
+        The sentinel value ``'rsDATA_7T_DKparcel.npy'`` (the default) selects
+        the Senden 7T resting-state data shipped in
+        ``experimental_data/senden/rsData_7T_DKparcel/`` (19 participants).
+        Any other value is taken as a path to a single subject's ``.npy`` file
+        and is read through :meth:`personalFunctionalConnectivities`.
+
+        Returns
+        -------
+        subjects : list of dict or None
+            One ``{'lh': DataFrame, 'rh': DataFrame}`` per participant, each
+            34x34, or None if the experimental data could not be found.
+        areas : ndarray or None
+            The 34 Desikan Killiany area names, or None alongside subjects.
         """
         data_dir = os.path.join(
             self.base_path, 'experimental_data/senden/rsData_7T_DKparcel/')
@@ -2926,7 +3054,8 @@ class Analysis():
             if self.logger:
                 self.logger.warning(
                     'No experimental data found (%s). Only simulated data '
-                    'will be plotted.', source)
+                    'will be plotted, and no simulated-vs-experimental FC '
+                    'correlation is computed.', source)
             return None, None
 
         # Read in regions of interest.
@@ -2942,7 +3071,7 @@ class Analysis():
         areas = roi.values[:34]
 
         if not group_average:
-            return self.personalFunctionalConnectivity(source, areas), areas
+            return self.personalFunctionalConnectivities(source, areas), areas
 
         # Read in the bold signal. BOLD.shape = (600, 85, 19)
         # First dimension: timesteps
@@ -2957,29 +3086,16 @@ class Analysis():
         resolution = 1.5
         timesteps = np.arange(600) * resolution
 
-        # Extract the number of persons
-        no_of_persons = BOLD.shape[2]
-
-        # Extract BOLD series into a dictionary of DataFrames
-        exp_fc = {'lh': np.zeros((34, 34)), 'rh': np.zeros((34, 34))}
-
-        # Loop over all persons
-        for person in range(no_of_persons):
-            # Left hemisphere is 0:34, right hemisphere is 34:68
-            lh_person = BOLD[:, 0:34, person]
-            rh_person = BOLD[:, 34:68, person]
-
-            # BOLD signal into DataFrames
-            lh = pd.DataFrame(lh_person, index=timesteps, columns=areas)
-            rh = pd.DataFrame(rh_person, index=timesteps, columns=areas)
-
-            # Correlations of all columns, i.e. areas, with each other
-            exp_fc['lh'] += lh.corr()
-            exp_fc['rh'] += rh.corr()
-
-        exp_fc['lh'] /= no_of_persons
-        exp_fc['rh'] /= no_of_persons
-        return exp_fc, areas
+        # Correlations of all columns, i.e. areas, with each other, per
+        # person; left hemisphere is 0:34, right hemisphere is 34:68
+        subjects = []
+        for person in range(BOLD.shape[2]):
+            subjects.append({
+                hemi: pd.DataFrame(BOLD[:, nodes, person], index=timesteps,
+                                   columns=areas).corr()
+                for hemi, nodes in (('lh', slice(0, 34)), ('rh', slice(34, 68)))
+            })
+        return subjects, areas
 
     @timeit
     def plot_functional_connectivity(self, save_fig=False, show_similarity_in_title=True):
@@ -3115,7 +3231,24 @@ class Analysis():
     @staticmethod
     def personalFunctionalConnectivity(path, areas):
         """
-        Load one subject's experimental functional connectivity.
+        Load one subject's experimental functional connectivity, averaged over
+        the participants the file holds (see
+        :meth:`personalFunctionalConnectivities`).
+
+        Returns
+        -------
+        exp_fc : dict
+            ``{'lh': DataFrame, 'rh': DataFrame}``, each 34x34.
+        """
+        subjects = Analysis.personalFunctionalConnectivities(path, areas)
+        return {hemi: sum(fc[hemi] for fc in subjects) / len(subjects)
+                for hemi in ('lh', 'rh')}
+
+    @staticmethod
+    def personalFunctionalConnectivities(path, areas):
+        """
+        Load one subject's experimental functional connectivity, one matrix
+        pair per participant axis entry.
 
         Two node layouts are recognised, and which one applies is decided by
         the node count rather than assumed:
@@ -3128,9 +3261,9 @@ class Analysis():
           cortex at 0:34 and 49:83.
 
         Either may be stored as a BOLD time series, ``(timesteps, nodes)`` or
-        ``(timesteps, nodes, participants)``, from which the correlation
-        matrix is computed (averaged over participants), or as an
-        already-computed ``(nodes, nodes)`` connectivity matrix.
+        ``(timesteps, nodes, participants)``, from which one correlation
+        matrix per participant is computed, or as an already-computed
+        ``(nodes, nodes)`` connectivity matrix (one participant).
 
         Parameters
         ----------
@@ -3141,8 +3274,9 @@ class Analysis():
 
         Returns
         -------
-        exp_fc : dict
-            ``{'lh': DataFrame, 'rh': DataFrame}``, each 34x34.
+        subjects : list of dict
+            One ``{'lh': DataFrame, 'rh': DataFrame}`` per participant, each
+            34x34.
         """
         data = np.load(path)
         n_nodes = data.shape[1]
@@ -3159,23 +3293,19 @@ class Analysis():
                 .format(path, n_nodes))
 
         if data.ndim == 2 and data.shape[0] == data.shape[1]:
-            return {
+            return [{
                 hemi: pd.DataFrame(data[nodes, nodes],
                                    index=areas, columns=areas)
                 for hemi, nodes in hemispheres.items()
-            }
+            }]
 
         # BOLD time series: add the participant axis if it is missing, then
-        # average the per-participant correlation matrices.
+        # correlate every participant on its own.
         bold = data[:, :, np.newaxis] if data.ndim == 2 else data
-        exp_fc = {}
-        for hemi, nodes in hemispheres.items():
-            correlations = [
-                pd.DataFrame(bold[:, nodes, person], columns=areas).corr()
-                for person in range(bold.shape[2])
-            ]
-            exp_fc[hemi] = sum(correlations) / len(correlations)
-        return exp_fc
+        return [{
+            hemi: pd.DataFrame(bold[:, nodes, person], columns=areas).corr()
+            for hemi, nodes in hemispheres.items()
+        } for person in range(bold.shape[2])]
 
     @timeit
     def calculateBOLDConnectivity(self):
@@ -3259,14 +3389,22 @@ class Analysis():
         # functional connectivity based on synaptic input currents
         # (df_sim_fc_syn)
         df_sim_fc_syn = synaptic_currents[synaptic_currents.index >= tmin].corr()
+        if df_sim_fc_syn.isna().all().all() and self.logger:
+            self.logger.warning(
+                'Simulated functional connectivity from synaptic currents is '
+                'undefined: every area has a constant input current after '
+                'tmin=%s ms, i.e. the network is silent in the analysis window. '
+                'Every correlation involving it is reported as NaN. Check the '
+                'working point (rates.pkl) before reading anything else.', tmin)
         if exclude_diagonal:
-            np.fill_diagonal(df_sim_fc_syn.values, np.nan)
+            df_sim_fc_syn = _nan_diagonal(df_sim_fc_syn)
 
         # Read in simulated functional connectivity based on calculated BOLD
         # signal
         df_sim_fc_bold = self.BOLD_correlation
         if exclude_diagonal:
-            np.fill_diagonal(df_sim_fc_bold.values, np.nan)
+            # A copy: self.BOLD_correlation is plotted afterwards
+            df_sim_fc_bold = _nan_diagonal(df_sim_fc_bold)
 
         # Sort
         df_sim_fc_syn = df_sim_fc_syn.sort_index(axis=0).sort_index(axis=1)
@@ -3287,9 +3425,7 @@ class Analysis():
 
         # Correlate simulated functional connectivity based on synaptic
         # currents and calculated BOLD signal
-        sim_fc_bold__sim_fc_syn__corr = np.corrcoef(
-                [sim_fc_bold, sim_fc_syn]
-                )[0,1]
+        sim_fc_bold__sim_fc_syn__corr = safe_corrcoef(sim_fc_bold, sim_fc_syn)
 
         # This is PEP 8 conform, but is it really nice?
         outfile.write(
@@ -3301,67 +3437,33 @@ class Analysis():
             # =================================================================
             # ============= READ IN AND EXTRACT EXPERIMENTAL DATA =============
             # =================================================================
-            # Set Path to experimental data
-            data_dir = os.path.join(
-                    self.base_path, 'experimental_data', 'senden', 'rsData_7T_DKparcel'
-                    )
-
-            # Read in regions of interest.
-            roi = pd.read_csv(
-                os.path.join(data_dir, 'ROIs.txt'),
-                header=None, names=['roi'], dtype=str
-            ).squeeze()
-            # The rois are given in this manner: ctx-lh-bankssts
-            # The name of the area is the last word after -
-            roi = roi.apply(lambda x: x.split('-')[-1])
-            # The cortical areas are in the range from 14 to 82
-            roi = roi.drop(range(0, 14)).drop(range(82, 85))
-
-            # Read in the bold signal. BOLD.shape = (600, 85, 19)
-            # First dimension: timesteps
-            # Second dimension: Desikan Killiany areas, left (0:34) and right
-            # (34:68) hemisphere
-            # Third dimension: Participants
-            # orientation discrimination, numerosity
-            BOLD = np.load(os.path.join(data_dir, 'rsDATA_7T_DKparcel.npy'))
-            BOLD = BOLD[:, 14:82, :]
-
-            # There are 600 timesteps in 1.5 second steps in the data
-            resolution = 1.5
-            timesteps = np.arange(600) * resolution
+            # The reference selected by ana_dict['experimental_fc'] - the
+            # Senden group data by default, or one subject's own BOLD - the
+            # same one plot_functional_connectivity draws.
+            subjects, _ = self._load_experimental_fc_subjects()
+            if subjects is None:
+                raise FileNotFoundError(self.ana_dict['experimental_fc'])
+            if self.logger:
+                self.logger.info(
+                    'Experimental FC reference: %s (%d participant(s))',
+                    self.ana_dict['experimental_fc'], len(subjects))
 
             # Extract the number of persons
-            no_of_persons = BOLD.shape[2]
+            no_of_persons = len(subjects)
 
-            # Extraction of Desikan Killiany area names from left hemisphere,
-            # i.e. 0:34, and stripping the first 3 characters indicating the
-            # hemisphere
-            areas = roi.values[:34]
-
-            # Extraction of BOLD series into a dictionary of Dataframes of form
-            # exp_fc[person][hemisphere]
-            # exp_fc contains the functional connectivities of 19 subjects
+            # Functional connectivities of the form exp_fc[person][hemisphere]
             exp_fc = {}
 
             # Loop over all persons
-            for person in range(no_of_persons):
-                # Left hemisphere is 0:34, right hemisphere is 34:68
-                lh_person = BOLD[:, 0:34, person]
-                rh_person = BOLD[:, 34:68, person]
-
-                # BOLD signal into DataFrames
-                lh = pd.DataFrame(lh_person, index=timesteps, columns=areas)
-                rh = pd.DataFrame(rh_person, index=timesteps, columns=areas)
-
-                # Correlations of all columns, i.e. areas, with each other
-                lh_fc = lh.corr()
-                rh_fc = rh.corr()
+            for person, fc in enumerate(subjects):
+                lh_fc = fc['lh']
+                rh_fc = fc['rh']
 
                 # Correlation with itself is trivially 1, set those values to
                 # nan
                 if exclude_diagonal:
-                    np.fill_diagonal(lh_fc.values, np.nan)
-                    np.fill_diagonal(rh_fc.values, np.nan)
+                    lh_fc = _nan_diagonal(lh_fc)
+                    rh_fc = _nan_diagonal(rh_fc)
 
                 # Sort and put into dictionary
                 lh_fc = lh_fc.sort_index(axis=0).sort_index(axis=1)
@@ -3397,28 +3499,32 @@ class Analysis():
                 exp_fc_array_lh.append(tmp_lh)
                 exp_fc_array_rh.append(tmp_rh)
 
-                exp_fc__sim_fc_syn__tmp_lh = np.corrcoef(sim_fc_syn, tmp_lh)[0, 1]
-                exp_fc__sim_fc_syn__tmp_rh = np.corrcoef(sim_fc_syn, tmp_rh)[0, 1]
+                exp_fc__sim_fc_syn__tmp_lh = safe_corrcoef(sim_fc_syn, tmp_lh)
+                exp_fc__sim_fc_syn__tmp_rh = safe_corrcoef(sim_fc_syn, tmp_rh)
                 exp_fc__sim_fc_syn__array_lh.append(exp_fc__sim_fc_syn__tmp_lh)
                 exp_fc__sim_fc_syn__array_rh.append(exp_fc__sim_fc_syn__tmp_rh)
 
-                exp_fc__sim_fc_bold__tmp_lh = np.corrcoef(sim_fc_bold, tmp_lh)[0, 1]
-                exp_fc__sim_fc_bold__tmp_rh = np.corrcoef(sim_fc_bold, tmp_rh)[0, 1]
+                exp_fc__sim_fc_bold__tmp_lh = safe_corrcoef(sim_fc_bold, tmp_lh)
+                exp_fc__sim_fc_bold__tmp_rh = safe_corrcoef(sim_fc_bold, tmp_rh)
                 exp_fc__sim_fc_bold__array_lh.append(exp_fc__sim_fc_bold__tmp_lh)
                 exp_fc__sim_fc_bold__array_rh.append(exp_fc__sim_fc_bold__tmp_rh)
 
-            exp__exp__corr_lh = np.corrcoef(exp_fc_array_lh)
-            exp__exp__corr_rh = np.corrcoef(exp_fc_array_rh)
-
             # Calculate mean correlation between functional connectivities.
             # This gives us to what extent the functional connectivities of the
-            # different subjects correspond to each other
-            exp__exp_mean__corr_lh = np.sum(
-                    np.tril(exp__exp__corr_lh, k=-1)
-                    ).sum() / np.sum(range(no_of_persons))
-            exp__exp_mean__corr_rh = np.sum(
-                    np.tril(exp__exp__corr_rh, k=-1)
-                    ).sum() / np.sum(range(no_of_persons))
+            # different subjects correspond to each other - undefined for a
+            # single subject's own reference.
+            if no_of_persons > 1:
+                exp__exp__corr_lh = np.corrcoef(exp_fc_array_lh)
+                exp__exp__corr_rh = np.corrcoef(exp_fc_array_rh)
+                exp__exp_mean__corr_lh = np.sum(
+                        np.tril(exp__exp__corr_lh, k=-1)
+                        ).sum() / np.sum(range(no_of_persons))
+                exp__exp_mean__corr_rh = np.sum(
+                        np.tril(exp__exp__corr_rh, k=-1)
+                        ).sum() / np.sum(range(no_of_persons))
+            else:
+                exp__exp__corr_lh = exp__exp__corr_rh = np.nan
+                exp__exp_mean__corr_lh = exp__exp_mean__corr_rh = np.nan
 
             outfile.write(
                     ('exp__exp__corr_lh:\n'
@@ -3473,21 +3579,13 @@ class Analysis():
 
             # Correlation experimental functional connectivity with simulated
             # functional connectivity based on synaptic currents
-            exp__sim_syn__corr_lh = np.corrcoef(
-                    [exp_fc_mean_lh, sim_fc_syn]
-                    )[0,1]
-            exp__sim_syn__corr_rh = np.corrcoef(
-                    [exp_fc_mean_rh, sim_fc_syn]
-                    )[0,1]
+            exp__sim_syn__corr_lh = safe_corrcoef(exp_fc_mean_lh, sim_fc_syn)
+            exp__sim_syn__corr_rh = safe_corrcoef(exp_fc_mean_rh, sim_fc_syn)
 
             # Correlation experimental functional connectivity with simulated
             # functional connectivity based on calculated BOLD signal
-            exp__sim_bold__corr_lh = np.corrcoef(
-                    [exp_fc_mean_lh, sim_fc_bold]
-                    )[0,1]
-            exp__sim_bold__corr_rh = np.corrcoef(
-                    [exp_fc_mean_rh, sim_fc_bold]
-                    )[0,1]
+            exp__sim_bold__corr_lh = safe_corrcoef(exp_fc_mean_lh, sim_fc_bold)
+            exp__sim_bold__corr_rh = safe_corrcoef(exp_fc_mean_rh, sim_fc_bold)
 
             outfile.write(
                     ('exp__sim_syn__corr_lh: '
@@ -3601,6 +3699,56 @@ class Analysis():
         plt.clf()
         plt.close(fig)
 
+    def _rasterWindow(self):
+        """
+        Time window (ms) of the raster plots, ``ana_dict['plotRasterArea']``.
+
+        A window that reaches outside the simulated time [0, t_sim] - typically
+        left behind when t_sim was changed - would give empty rasters. It is
+        moved to the end of the simulation instead, keeping its length, and a
+        warning names both windows.
+
+        Returns
+        -------
+        (low, high) : tuple of float
+        """
+        low = float(self.ana_dict['plotRasterArea']['low'])
+        high = float(self.ana_dict['plotRasterArea']['high'])
+        t_sim = float(self.sim_dict['t_sim'])
+        if low < 0. or high > t_sim or low >= high:
+            length = min(high - low if high > low else 1000., t_sim)
+            new_low, new_high = t_sim - length, t_sim
+            if not getattr(self, '_raster_window_warned', False):
+                self._raster_window_warned = True
+                if self.logger:
+                    self.logger.warning(
+                        'Raster window [%g, %g] ms lies outside the simulated '
+                        '[0, %g] ms; using [%g, %g] ms. Set '
+                        'ana_params["plotRasterArea"] low / high accordingly.',
+                        low, high, t_sim, new_low, new_high)
+            low, high = new_low, new_high
+        return low, high
+
+    @staticmethod
+    def _rasterLegend(ax, entries, fontsize=10):
+        """
+        Legend of a raster plot in the lower right corner.
+
+        Parameters
+        ----------
+        ax : matplotlib.axes.Axes
+        entries : list of (str, color)
+            Label and dot colour of every kind of neuron in the plot.
+        fontsize : float
+        """
+        handles = [
+            plt.Line2D([], [], color=color, marker='.', markersize=8,
+                       linestyle='None', label=label)
+            for label, color in entries
+        ]
+        ax.legend(handles=handles, loc='lower right', fontsize=fontsize,
+                  framealpha=0.9)
+
     def plotRasterArea(self, area):
         """
         Generates a rasterplot of the spiking activity in a specified area.
@@ -3612,8 +3760,7 @@ class Analysis():
             self.popGids = self._readPopGids()
         extension = self.ana_dict['extension']
         fraction = self.ana_dict['plotRasterArea']['fraction']
-        low = self.ana_dict['plotRasterArea']['low']
-        high = self.ana_dict['plotRasterArea']['high']
+        low, high = self._rasterWindow()
         fig = plt.figure(1, figsize=(8, 7))
         ax1 = fig.add_subplot(1, 1, 1)
         ind = []
@@ -3626,7 +3773,9 @@ class Analysis():
             name = ' '.join([layer, pop])
             names.append(name)
 
-            # Random shuffle spiketrains in place
+            # Random shuffle spiketrains (a copy: self.spikes stays aligned
+            # with self.spike_gids)
+            sts = list(sts)
             random.shuffle(sts)
             j = 0
             # Real population size, not all neurons spiked. Thus take the
@@ -3661,6 +3810,8 @@ class Analysis():
                             linestyle="None"
                         )
     
+        self._rasterLegend(ax1, [('Excitatory (E)', colors['E']),
+                                 ('Inhibitory (I)', colors['I'])])
         ax1.axis([low * ms_to_s, high * ms_to_s, gid_norm, 0])
         ax1.set_xlabel('Time (s)', fontdict={"size": 12})
         ax1.tick_params(axis="x", labelsize=12)
@@ -3675,112 +3826,110 @@ class Analysis():
         plt.clf()
         plt.close(fig)
 
-    def plotRasterAbetaArea(self, area):
+    def plotRasterNeuronTypeArea(self, area):
         """
-        Generates a rasterplot of the spiking activity in a specified area.
-        Parameters low and high are in ms.
+        Generates a rasterplot of the spiking activity in a specified area,
+        coloured by neuron type. Parameters low and high are in ms.
+
+        A random sample of ``fraction`` of the neurons of every population,
+        silent ones included, is drawn and shown in GID order. The neuron
+        types occupy contiguous GID ranges, so every type forms a band of its
+        own, and each row is coloured by the type of its actual neuron.
         ----------
         area : string
         """
-        if not self._abeta_active():
+        if not self._active_neuron_types():
             if self.logger:
                 self.logger.info(
-                    'No Abeta neurons (Abeta disabled or all ratios zero); '
-                    'skipping Abeta raster for %s.', area)
+                    'No custom neuron types (none configured or all ratios '
+                    'zero); skipping neuron type raster for %s.', area)
+            return
+        gids_all = self._spikeGids()
+        if gids_all is None:
+            if self.logger:
+                self.logger.warning(
+                    'Spike trains carry no GIDs (python_sort=False); skipping '
+                    'neuron type raster for %s.', area)
             return
         if not hasattr(self, 'popGids'):
             self.popGids = self._readPopGids()
-        if not hasattr(self, "AbetaGids"):
-            self.AbetaGids = self._readAbetaPopGids()
-        
+        if not hasattr(self, 'typeGids'):
+            self.typeGids = self._readNeuronTypeGids()
+
         extension = self.ana_dict['extension']
         fraction = self.ana_dict['plotRasterArea']['fraction']
-        low = self.ana_dict['plotRasterArea']['low']
-        high = self.ana_dict['plotRasterArea']['high']
+        low, high = self._rasterWindow()
         fig = plt.figure(1, figsize=(8, 7))
         ax1 = fig.add_subplot(1, 1, 1)
         ind = []
         names = []
         gid_norm = 0
         ms_to_s = 0.001
-        colors = {'Abeta_E': '#1f77b4', 'Abeta_I': '#ff7f0e', "E": "#a8dbff", "I": "#ffd6b3"}
+        # Base neurons in light E / I colours, every custom type in a colour
+        # of its own (fixed by its position in neuron_types).
+        base_colors = {'E': '#a8dbff', 'I': '#ffd6b3'}
+        type_palette = ['#2ca02c', '#d62728', '#9467bd', '#8c564b',
+                        '#e377c2', '#7f7f7f', '#bcbd22', '#17becf']
+        type_colors = {
+            name: type_palette[i % len(type_palette)]
+            for i, name in enumerate(self.net_dict['neuron_types'])
+        }
+        present_types = set()   # in the legend even if they stay silent
 
         for (layer, pop), sts in self.spikes.loc[area].items():
-            # y label axis naming
-            name = ' '.join([layer, pop])
-            names.append(name)
-
-            # Random shuffle spiketrains in place  
-            random.shuffle(sts)
-            j = 0
-            
-            # Real population size, not all neurons spiked. Thus take the
-            # fraction from this value.
-            pop_size = self.popGids.loc[area, layer, pop].maxGID - \
-                    self.popGids.loc[area, layer, pop].minGID + 1
-            
-            # 获取当前群体的GID范围
-            min_gid = self.popGids.loc[area, layer, pop].minGID
-            max_gid = self.popGids.loc[area, layer, pop].maxGID
-            
-            # 检查当前群体是否有对应的Abeta神经元
-            has_abeta = False
-            abeta_min_gid = None
-            abeta_max_gid = None
-            try:
-                abeta_info = self.AbetaGids.loc[area, layer, pop]
-                abeta_min_gid = abeta_info.minGID
-                abeta_max_gid = abeta_info.maxGID
-                has_abeta = True
-            except KeyError:
-                # 当前群体没有Abeta神经元
-                has_abeta = False
-            
-            # Fraction of total number of neurons
+            names.append(' '.join([layer, pop]))
+            pop_gids = self.popGids.loc[area, layer, pop]
+            min_gid, max_gid = int(pop_gids.minGID), int(pop_gids.maxGID)
+            pop_size = max_gid - min_gid + 1
             no_sts = int(fraction * pop_size)
-            # Fraction of neurons that actually spiked
-            frac_spiking = len(sts) * 1. / pop_size
+
+            # Spike train of every neuron that spiked, by GID
+            train_of = dict(zip(gids_all.loc[(area, layer, pop)], sts))
+            # GID ranges of the neuron types within this population
+            try:
+                type_ranges = [
+                    (row.minGID, row.maxGID, neuron_type)
+                    for neuron_type, row in
+                    self.typeGids.loc[(area, layer, pop)].iterrows()
+                ]
+            except KeyError:
+                type_ranges = []
 
             # where to put y label
             ind.append(- int(no_sts / 2) + gid_norm)
-            
-            # Loop as many times as we have spike trains
-            for i in range(no_sts):
-                gid_norm = gid_norm - 1
-                # Decide whether spiketrain contains spikes
-                if random.random() < frac_spiking and j < len(sts):
-                    st = sts[j]
-                    j += 1
-                    filtered_st = st[st > low]
-                    filtered_st = filtered_st[filtered_st < high]
-                    
-                    if len(filtered_st) > 0:
-                        # 计算当前神经元的近似GID
-                        # 基于在显示序列中的位置推算实际GID
-                        neuron_gid = min_gid + int((i / no_sts) * pop_size)
-                        
-                        # 检查当前神经元是否为Abeta神经元
-                        is_abeta = (has_abeta and 
-                                abeta_min_gid <= neuron_gid <= abeta_max_gid)
-                        
-                        # 根据是否为Abeta神经元选择颜色
-                        if is_abeta:
-                            if pop == 'E':
-                                color = colors['Abeta_E']
-                            else:  # pop == 'I'
-                                color = colors['Abeta_I']
-                        else:
-                            color = colors[pop]
-                        
-                        ax1.plot(
-                            filtered_st * ms_to_s,
-                            gid_norm * np.ones_like(filtered_st),
-                            color,
-                            marker='.',
-                            markersize=2,
-                            linestyle="None"
-                        )
 
+            sample = sorted(random.sample(range(min_gid, max_gid + 1), no_sts))
+            for gid in sample:
+                gid_norm = gid_norm - 1
+                neuron_type = next(
+                    (t for lo, hi, t in type_ranges if lo <= gid <= hi),
+                    BASE_TYPE)
+                present_types.add(neuron_type if neuron_type != BASE_TYPE
+                                  else (BASE_TYPE, pop))
+                st = train_of.get(gid)
+                if st is None:
+                    continue
+                st = st[(st > low) & (st < high)]
+                if len(st) == 0:
+                    continue
+                if neuron_type == BASE_TYPE:
+                    color = base_colors[pop]
+                else:
+                    color = type_colors[neuron_type]
+                ax1.plot(
+                    st * ms_to_s,
+                    gid_norm * np.ones_like(st),
+                    color,
+                    marker='.',
+                    markersize=2,
+                    linestyle="None"
+                )
+
+        entries = [('{} (base)'.format(p), base_colors[p]) for p in ('E', 'I')
+                   if (BASE_TYPE, p) in present_types]
+        entries += [(t, type_colors[t]) for t in self.net_dict['neuron_types']
+                    if t in present_types]
+        self._rasterLegend(ax1, entries)
         ax1.axis([low * ms_to_s, high * ms_to_s, gid_norm, 0])
         ax1.set_xlabel('Time (s)', fontdict={"size": 12})
         ax1.tick_params(axis="x", labelsize=12)
@@ -3789,7 +3938,7 @@ class Analysis():
         ax1.set_title(area, fontdict={"size": 16})
         fig.savefig(os.path.join(
             self._category_plot_folder('raster'),
-            'raster_Abeta_{0}.{1}'.format(area, extension)
+            'raster_neuron_types_{0}.{1}'.format(area, extension)
         ), dpi=self.ana_dict['dpi'])
         plt.clf()
         plt.close(fig)
@@ -3813,8 +3962,7 @@ class Analysis():
         
         colors = {'E': '#4c72b0ff', 'I': '#c44e52ff'}
         raster_fraction = self.ana_dict['plotRasterArea']['fraction']
-        raster_low = self.ana_dict['plotRasterArea']['low']
-        raster_high = self.ana_dict['plotRasterArea']['high']
+        raster_low, raster_high = self._rasterWindow()
         roman_to_arabic_numerals = {
             'II/III': '2/3',
             'IV': '4',
@@ -3871,7 +4019,8 @@ class Analysis():
             gid_norm = 0
             for (layer, pop), sts in self.spikes.loc[area].items():
                 layer_roman = roman_to_arabic_numerals[layer]
-                # Random shuffle spiketrains in place
+                # Random shuffle spiketrains (a copy, see plotRasterArea)
+                sts = list(sts)
                 random.shuffle(sts)
 
                 # Real population size, not all neurons spiked. Thus take the fraction from this value.
@@ -3906,6 +4055,8 @@ class Analysis():
                                 linestyle="None"
                             )
 
+            self._rasterLegend(ax, [('E', colors['E']), ('I', colors['I'])],
+                               fontsize=7)
             ax.axis([raster_low * ms_to_s, raster_high * ms_to_s, gid_norm, 0])
             ax.set_xlabel('Time (s)')
             ax.set_yticks(ind)
@@ -4295,6 +4446,61 @@ class Analysis():
             spikes.to_pickle(os.path.join(self.sim_folder, 'spikes.pkl'))
         return spikes
 
+    def _spikeGids(self):
+        """
+        GID of every spike train in ``self.spikes``, same index and order.
+
+        Written by the python_sort reader next to ``spikes.pkl``. Returns None
+        when it is not available (the shell-based reader does not keep GIDs);
+        callers then fall back to population-level approximations.
+        """
+        if getattr(self, 'spike_gids', None) is None:
+            try:
+                self.spike_gids = pd.read_pickle(
+                    os.path.join(self.sim_folder, 'spike_gids.pkl'))
+            except FileNotFoundError:
+                if not self.ana_dict['python_sort']:
+                    return None
+                # spikes.pkl cached by an older version: read them again
+                self._readSpikesFromDAT()
+        return self.spike_gids
+
+    def _neuronParam(self, area, layer, pop, gids, key):
+        """
+        Neuron parameter of individual neurons, from their neuron type.
+
+        Parameters
+        ----------
+        area, layer, pop : str
+            Population of the neurons.
+        gids : array of int
+            GIDs of the neurons.
+        key : str
+            Neuron parameter, e.g. ``'t_ref'``.
+
+        Returns
+        -------
+        values : ndarray
+            One value per GID.
+        """
+        values = np.full(len(gids), float(self.net_dict['neuron_params_' + pop][key]))
+        neuron_types = self.net_dict.get('neuron_types') or {}
+        if not neuron_types or len(gids) == 0:
+            return values
+        if not hasattr(self, 'typeGids'):
+            self.typeGids = self._readNeuronTypeGids()
+        try:
+            rows = self.typeGids.loc[(area, layer, pop)]
+        except KeyError:
+            return values
+        gids = np.asarray(gids)
+        for neuron_type, row in rows.iterrows():
+            if neuron_type in neuron_types:
+                prm = neuron_types[neuron_type]['neuron_params_' + pop]
+                if key in prm:
+                    values[(gids >= row.minGID) & (gids <= row.maxGID)] = prm[key]
+        return values
+
     @timeit
     def _readPopGids(self):
         """
@@ -4326,37 +4532,36 @@ class Analysis():
         return popGids
 
     @timeit
-    def _readAbetaPopGids(self):
+    def _readNeuronTypeGids(self):
         """
-        Reads the min / max GID for each Abeta-affected population.
+        Reads the min / max GID of every neuron type in each population.
 
         Returns
         -------
-        popGids : DataFrame
-            Columns ['minGID', 'maxGID']
+        typeGids : DataFrame
+            Index ['area', 'layer', 'pop', 'type'],
+            columns ['minGID', 'maxGID', 'pop_size']
         """
         try:
-            popGids = pd.read_pickle(
-                os.path.join(self.sim_folder, 'Abeta_GID.pkl')
+            typeGids = pd.read_pickle(
+                os.path.join(self.sim_folder, 'neuron_type_GIDs.pkl')
             )
         except FileNotFoundError:
-            try:
-                popGids = pd.read_csv(
-                    os.path.join(self.sim_folder, 'Abeta_GIDs.dat'),
-                    sep=';', header=None, names=['minGID', 'maxGID', "pop_size"]
-                )
-                popGids.index = pd.MultiIndex.from_tuples([
-                    literal_eval(s) for s in popGids.index
-                ])
-                popGids.index.names = ['area', 'layer', 'pop']
-                # Save popGids to pickle for faster read access
-                popGids.to_pickle(
-                    os.path.join(self.sim_folder, 'Abeta_GIDs.pkl')
-                )
-            except FileNotFoundError:
-                a = np.random.default_rng(43)
-                b = np.random.default_rng(a.choice(10000, 1))
-        return popGids
+            typeGids = pd.read_csv(
+                os.path.join(self.sim_folder, 'neuron_type_GIDs.dat'),
+                sep=';', header=None,
+                names=['pop', 'type', 'minGID', 'maxGID', 'pop_size']
+            )
+            typeGids.index = pd.MultiIndex.from_tuples([
+                literal_eval(p) + (t,)
+                for p, t in zip(typeGids['pop'], typeGids['type'])
+            ], names=['area', 'layer', 'pop', 'type'])
+            typeGids = typeGids.drop(columns=['pop', 'type']).sort_index()
+            # Save typeGids to pickle for faster read access
+            typeGids.to_pickle(
+                os.path.join(self.sim_folder, 'neuron_type_GIDs.pkl')
+            )
+        return typeGids
 
     @timeit
     def _readIsyn(self):
@@ -4434,13 +4639,18 @@ class Analysis():
                 except IndexError:
                     no_spiking.append([area, layer, pop])
                     pass
-            spikes = spikes.groupby(
-                    ['area', 'layer', 'pop']
-                    ).apply(lambda group: group.t.values)
+            grouped = spikes.groupby(['area', 'layer', 'pop'])
+            # GID of every spike train, in the same order as the trains
+            gids = grouped.apply(lambda group: group.gid.values.astype(np.int64))
+            spikes = grouped.apply(lambda group: group.t.values)
 
             for (area, layer, pop) in no_spiking:
                 spikes.loc[area, layer, pop] = np.array([])
+                gids.loc[area, layer, pop] = np.array([], dtype=np.int64)
             spikes = spikes.sort_index()
+            self.spike_gids = gids.sort_index()
+            self.spike_gids.to_pickle(
+                os.path.join(self.sim_folder, 'spike_gids.pkl'))
             return spikes
         else:
             # This routine should be used when the simulated time is long, eg
@@ -4963,8 +5173,9 @@ def _fc_similarity(mat_a, mat_b):
     b = np.asarray(mat_b)
     iu = np.triu_indices_from(a, k=1)
     va, vb = a[iu], b[iu]
-    pearson_r = np.corrcoef(va, vb)[0, 1]
-    cosine_sim = np.dot(va, vb) / (np.linalg.norm(va) * np.linalg.norm(vb))
+    pearson_r = safe_corrcoef(va, vb)
+    norms = np.linalg.norm(va) * np.linalg.norm(vb)
+    cosine_sim = np.dot(va, vb) / norms if norms else np.nan
     return pearson_r, cosine_sim
 
 
@@ -5127,6 +5338,8 @@ def LV(sts, t_ref, t_start=None, t_stop=None, LV_min_spikes=3, take_mean=True):
     ----------
     sts : list
         list of spiketrains
+    t_ref : float or array
+        Refractory period (ms), one value or one per spike train
     t_start : float
         First timestep to take into account
     t_stop :
@@ -5137,16 +5350,17 @@ def LV(sts, t_ref, t_start=None, t_stop=None, LV_min_spikes=3, take_mean=True):
     lv : float
         sum of single lvs, needs to normalized (=divided by neuron numbers)
     """
+    # t_ref: one value for all spike trains, or one per spike train
+    t_ref = np.broadcast_to(np.asarray(t_ref, dtype=float), (len(sts),))
     # ensure that there are only spiketrains of len > 2.
     # So every spiketrain st in sts has len(st) > 1.
     if t_start:
         sts = [st[st >= t_start] for st in sts]
     if t_stop:
         sts = [st[st <= t_stop] for st in sts]
-    sts = [st for st in sts if len(st) >= LV_min_spikes]
-    if len(sts) > 0:
-        isi = [np.diff(x, 1) for x in sts]
-        lvr = [calculate_lv(x, t_ref) for x in isi]
+    keep = [i for i, st in enumerate(sts) if len(st) >= LV_min_spikes]
+    if len(keep) > 0:
+        lvr = [calculate_lv(np.diff(sts[i], 1), t_ref[i]) for i in keep]
         if take_mean:
             return np.mean(lvr)
         else:

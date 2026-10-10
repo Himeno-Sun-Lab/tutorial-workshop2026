@@ -12,7 +12,7 @@ params['extension'] = 'png'
 # Resolution (dots per inch) for every saved figure. Passed explicitly to each
 # savefig() call so it does not depend on matplotlib's ambient rcParams (which
 # plt.style.use() mutates globally and, in a few places, never resets).
-params['dpi'] = 600
+params['dpi'] = 120
 params['seed'] = 2903
 params['python_sort'] = True
 params["I_syn_python_sort"] = False
@@ -103,7 +103,12 @@ params['plotAreaLfpCorrelation'] = {
 params['calcAreaLfpCoherence'] = {
     'tmin': 500.,    # in ms
     'fmin': 0.01,    # in Hz
-    'fmax': 120.     # in Hz
+    'fmax': 80.,     # in Hz
+    # Welch / CSD segment length in samples, the same for both. None -> 500 ms
+    # segments: 2 Hz resolution at any sampling rate, so the band holds the
+    # bins 2, 4, ..., 80 Hz. Longer segments resolve finer but average fewer
+    # segments, which biases coherence upward.
+    'nperseg': None
     }
 
 params['plotAreaLfpCoherence'] = {
@@ -126,7 +131,9 @@ params['plotLfpPsdArea'] = {
 params['calcLfpCoherence'] = {
     'tmin': 500.,  # in ms
     'fmin': 0.01,    # in Hz
-    'fmax': 120.   # in Hz
+    'fmax': 80.,   # in Hz
+    # See calcAreaLfpCoherence['nperseg'].
+    'nperseg': None
     }
 
 params['plotLayerLfpCoherence'] = {
