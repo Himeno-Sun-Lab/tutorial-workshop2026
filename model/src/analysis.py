@@ -51,6 +51,16 @@ def safe_corrcoef(a, b):
     return np.corrcoef(a, b)[0, 1]
 
 
+def _nan_diagonal(df):
+    """Copy of a square DataFrame with NaN on its diagonal.
+
+    Unlike ``np.fill_diagonal(df.values, np.nan)`` this neither modifies the
+    input (which may be a cached result) nor depends on ``.values`` being a
+    writable view, which it is not under pandas' copy-on-write.
+    """
+    return df.mask(np.eye(len(df), dtype=bool))
+
+
 def timeit(method):
     def timed(*args, **kw):
         ts = time.time()
@@ -2994,14 +3004,9 @@ class Analysis():
     def _load_experimental_fc(self):
         """
         Load the experimental functional connectivity selected by
-        ``ana_dict['experimental_fc']``.
+        ``ana_dict['experimental_fc']``, averaged over its participants.
 
-        The sentinel value ``'rsDATA_7T_DKparcel.npy'`` (the default) selects
-        the group-averaged Senden 7T resting-state data shipped in
-        ``experimental_data/senden/rsData_7T_DKparcel/``; the per-participant
-        correlation matrices are averaged over all participants. Any other
-        value is taken as a path to a single subject's ``.npy`` file and is
-        read through :meth:`personalFunctionalConnectivity`.
+        See :meth:`_load_experimental_fc_subjects` for the accepted sources.
 
         Returns
         -------
@@ -3010,6 +3015,32 @@ class Analysis():
             experimental data could not be found.
         areas : ndarray or None
             The 34 Desikan Killiany area names, or None alongside exp_fc.
+        """
+        subjects, areas = self._load_experimental_fc_subjects()
+        if subjects is None:
+            return None, None
+        exp_fc = {hemi: sum(fc[hemi] for fc in subjects) / len(subjects)
+                  for hemi in ('lh', 'rh')}
+        return exp_fc, areas
+
+    def _load_experimental_fc_subjects(self):
+        """
+        Load the experimental functional connectivity selected by
+        ``ana_dict['experimental_fc']``, one matrix pair per participant.
+
+        The sentinel value ``'rsDATA_7T_DKparcel.npy'`` (the default) selects
+        the Senden 7T resting-state data shipped in
+        ``experimental_data/senden/rsData_7T_DKparcel/`` (19 participants).
+        Any other value is taken as a path to a single subject's ``.npy`` file
+        and is read through :meth:`personalFunctionalConnectivities`.
+
+        Returns
+        -------
+        subjects : list of dict or None
+            One ``{'lh': DataFrame, 'rh': DataFrame}`` per participant, each
+            34x34, or None if the experimental data could not be found.
+        areas : ndarray or None
+            The 34 Desikan Killiany area names, or None alongside subjects.
         """
         data_dir = os.path.join(
             self.base_path, 'experimental_data/senden/rsData_7T_DKparcel/')
@@ -3023,7 +3054,8 @@ class Analysis():
             if self.logger:
                 self.logger.warning(
                     'No experimental data found (%s). Only simulated data '
-                    'will be plotted.', source)
+                    'will be plotted, and no simulated-vs-experimental FC '
+                    'correlation is computed.', source)
             return None, None
 
         # Read in regions of interest.
@@ -3039,7 +3071,7 @@ class Analysis():
         areas = roi.values[:34]
 
         if not group_average:
-            return self.personalFunctionalConnectivity(source, areas), areas
+            return self.personalFunctionalConnectivities(source, areas), areas
 
         # Read in the bold signal. BOLD.shape = (600, 85, 19)
         # First dimension: timesteps
@@ -3054,29 +3086,16 @@ class Analysis():
         resolution = 1.5
         timesteps = np.arange(600) * resolution
 
-        # Extract the number of persons
-        no_of_persons = BOLD.shape[2]
-
-        # Extract BOLD series into a dictionary of DataFrames
-        exp_fc = {'lh': np.zeros((34, 34)), 'rh': np.zeros((34, 34))}
-
-        # Loop over all persons
-        for person in range(no_of_persons):
-            # Left hemisphere is 0:34, right hemisphere is 34:68
-            lh_person = BOLD[:, 0:34, person]
-            rh_person = BOLD[:, 34:68, person]
-
-            # BOLD signal into DataFrames
-            lh = pd.DataFrame(lh_person, index=timesteps, columns=areas)
-            rh = pd.DataFrame(rh_person, index=timesteps, columns=areas)
-
-            # Correlations of all columns, i.e. areas, with each other
-            exp_fc['lh'] += lh.corr()
-            exp_fc['rh'] += rh.corr()
-
-        exp_fc['lh'] /= no_of_persons
-        exp_fc['rh'] /= no_of_persons
-        return exp_fc, areas
+        # Correlations of all columns, i.e. areas, with each other, per
+        # person; left hemisphere is 0:34, right hemisphere is 34:68
+        subjects = []
+        for person in range(BOLD.shape[2]):
+            subjects.append({
+                hemi: pd.DataFrame(BOLD[:, nodes, person], index=timesteps,
+                                   columns=areas).corr()
+                for hemi, nodes in (('lh', slice(0, 34)), ('rh', slice(34, 68)))
+            })
+        return subjects, areas
 
     @timeit
     def plot_functional_connectivity(self, save_fig=False, show_similarity_in_title=True):
@@ -3212,7 +3231,24 @@ class Analysis():
     @staticmethod
     def personalFunctionalConnectivity(path, areas):
         """
-        Load one subject's experimental functional connectivity.
+        Load one subject's experimental functional connectivity, averaged over
+        the participants the file holds (see
+        :meth:`personalFunctionalConnectivities`).
+
+        Returns
+        -------
+        exp_fc : dict
+            ``{'lh': DataFrame, 'rh': DataFrame}``, each 34x34.
+        """
+        subjects = Analysis.personalFunctionalConnectivities(path, areas)
+        return {hemi: sum(fc[hemi] for fc in subjects) / len(subjects)
+                for hemi in ('lh', 'rh')}
+
+    @staticmethod
+    def personalFunctionalConnectivities(path, areas):
+        """
+        Load one subject's experimental functional connectivity, one matrix
+        pair per participant axis entry.
 
         Two node layouts are recognised, and which one applies is decided by
         the node count rather than assumed:
@@ -3225,9 +3261,9 @@ class Analysis():
           cortex at 0:34 and 49:83.
 
         Either may be stored as a BOLD time series, ``(timesteps, nodes)`` or
-        ``(timesteps, nodes, participants)``, from which the correlation
-        matrix is computed (averaged over participants), or as an
-        already-computed ``(nodes, nodes)`` connectivity matrix.
+        ``(timesteps, nodes, participants)``, from which one correlation
+        matrix per participant is computed, or as an already-computed
+        ``(nodes, nodes)`` connectivity matrix (one participant).
 
         Parameters
         ----------
@@ -3238,8 +3274,9 @@ class Analysis():
 
         Returns
         -------
-        exp_fc : dict
-            ``{'lh': DataFrame, 'rh': DataFrame}``, each 34x34.
+        subjects : list of dict
+            One ``{'lh': DataFrame, 'rh': DataFrame}`` per participant, each
+            34x34.
         """
         data = np.load(path)
         n_nodes = data.shape[1]
@@ -3256,23 +3293,19 @@ class Analysis():
                 .format(path, n_nodes))
 
         if data.ndim == 2 and data.shape[0] == data.shape[1]:
-            return {
+            return [{
                 hemi: pd.DataFrame(data[nodes, nodes],
                                    index=areas, columns=areas)
                 for hemi, nodes in hemispheres.items()
-            }
+            }]
 
         # BOLD time series: add the participant axis if it is missing, then
-        # average the per-participant correlation matrices.
+        # correlate every participant on its own.
         bold = data[:, :, np.newaxis] if data.ndim == 2 else data
-        exp_fc = {}
-        for hemi, nodes in hemispheres.items():
-            correlations = [
-                pd.DataFrame(bold[:, nodes, person], columns=areas).corr()
-                for person in range(bold.shape[2])
-            ]
-            exp_fc[hemi] = sum(correlations) / len(correlations)
-        return exp_fc
+        return [{
+            hemi: pd.DataFrame(bold[:, nodes, person], columns=areas).corr()
+            for hemi, nodes in hemispheres.items()
+        } for person in range(bold.shape[2])]
 
     @timeit
     def calculateBOLDConnectivity(self):
@@ -3364,13 +3397,14 @@ class Analysis():
                 'Every correlation involving it is reported as NaN. Check the '
                 'working point (rates.pkl) before reading anything else.', tmin)
         if exclude_diagonal:
-            np.fill_diagonal(df_sim_fc_syn.values, np.nan)
+            df_sim_fc_syn = _nan_diagonal(df_sim_fc_syn)
 
         # Read in simulated functional connectivity based on calculated BOLD
         # signal
         df_sim_fc_bold = self.BOLD_correlation
         if exclude_diagonal:
-            np.fill_diagonal(df_sim_fc_bold.values, np.nan)
+            # A copy: self.BOLD_correlation is plotted afterwards
+            df_sim_fc_bold = _nan_diagonal(df_sim_fc_bold)
 
         # Sort
         df_sim_fc_syn = df_sim_fc_syn.sort_index(axis=0).sort_index(axis=1)
@@ -3403,67 +3437,33 @@ class Analysis():
             # =================================================================
             # ============= READ IN AND EXTRACT EXPERIMENTAL DATA =============
             # =================================================================
-            # Set Path to experimental data
-            data_dir = os.path.join(
-                    self.base_path, 'experimental_data', 'senden', 'rsData_7T_DKparcel'
-                    )
-
-            # Read in regions of interest.
-            roi = pd.read_csv(
-                os.path.join(data_dir, 'ROIs.txt'),
-                header=None, names=['roi'], dtype=str
-            ).squeeze()
-            # The rois are given in this manner: ctx-lh-bankssts
-            # The name of the area is the last word after -
-            roi = roi.apply(lambda x: x.split('-')[-1])
-            # The cortical areas are in the range from 14 to 82
-            roi = roi.drop(range(0, 14)).drop(range(82, 85))
-
-            # Read in the bold signal. BOLD.shape = (600, 85, 19)
-            # First dimension: timesteps
-            # Second dimension: Desikan Killiany areas, left (0:34) and right
-            # (34:68) hemisphere
-            # Third dimension: Participants
-            # orientation discrimination, numerosity
-            BOLD = np.load(os.path.join(data_dir, 'rsDATA_7T_DKparcel.npy'))
-            BOLD = BOLD[:, 14:82, :]
-
-            # There are 600 timesteps in 1.5 second steps in the data
-            resolution = 1.5
-            timesteps = np.arange(600) * resolution
+            # The reference selected by ana_dict['experimental_fc'] - the
+            # Senden group data by default, or one subject's own BOLD - the
+            # same one plot_functional_connectivity draws.
+            subjects, _ = self._load_experimental_fc_subjects()
+            if subjects is None:
+                raise FileNotFoundError(self.ana_dict['experimental_fc'])
+            if self.logger:
+                self.logger.info(
+                    'Experimental FC reference: %s (%d participant(s))',
+                    self.ana_dict['experimental_fc'], len(subjects))
 
             # Extract the number of persons
-            no_of_persons = BOLD.shape[2]
+            no_of_persons = len(subjects)
 
-            # Extraction of Desikan Killiany area names from left hemisphere,
-            # i.e. 0:34, and stripping the first 3 characters indicating the
-            # hemisphere
-            areas = roi.values[:34]
-
-            # Extraction of BOLD series into a dictionary of Dataframes of form
-            # exp_fc[person][hemisphere]
-            # exp_fc contains the functional connectivities of 19 subjects
+            # Functional connectivities of the form exp_fc[person][hemisphere]
             exp_fc = {}
 
             # Loop over all persons
-            for person in range(no_of_persons):
-                # Left hemisphere is 0:34, right hemisphere is 34:68
-                lh_person = BOLD[:, 0:34, person]
-                rh_person = BOLD[:, 34:68, person]
-
-                # BOLD signal into DataFrames
-                lh = pd.DataFrame(lh_person, index=timesteps, columns=areas)
-                rh = pd.DataFrame(rh_person, index=timesteps, columns=areas)
-
-                # Correlations of all columns, i.e. areas, with each other
-                lh_fc = lh.corr()
-                rh_fc = rh.corr()
+            for person, fc in enumerate(subjects):
+                lh_fc = fc['lh']
+                rh_fc = fc['rh']
 
                 # Correlation with itself is trivially 1, set those values to
                 # nan
                 if exclude_diagonal:
-                    np.fill_diagonal(lh_fc.values, np.nan)
-                    np.fill_diagonal(rh_fc.values, np.nan)
+                    lh_fc = _nan_diagonal(lh_fc)
+                    rh_fc = _nan_diagonal(rh_fc)
 
                 # Sort and put into dictionary
                 lh_fc = lh_fc.sort_index(axis=0).sort_index(axis=1)
@@ -3509,18 +3509,22 @@ class Analysis():
                 exp_fc__sim_fc_bold__array_lh.append(exp_fc__sim_fc_bold__tmp_lh)
                 exp_fc__sim_fc_bold__array_rh.append(exp_fc__sim_fc_bold__tmp_rh)
 
-            exp__exp__corr_lh = np.corrcoef(exp_fc_array_lh)
-            exp__exp__corr_rh = np.corrcoef(exp_fc_array_rh)
-
             # Calculate mean correlation between functional connectivities.
             # This gives us to what extent the functional connectivities of the
-            # different subjects correspond to each other
-            exp__exp_mean__corr_lh = np.sum(
-                    np.tril(exp__exp__corr_lh, k=-1)
-                    ).sum() / np.sum(range(no_of_persons))
-            exp__exp_mean__corr_rh = np.sum(
-                    np.tril(exp__exp__corr_rh, k=-1)
-                    ).sum() / np.sum(range(no_of_persons))
+            # different subjects correspond to each other - undefined for a
+            # single subject's own reference.
+            if no_of_persons > 1:
+                exp__exp__corr_lh = np.corrcoef(exp_fc_array_lh)
+                exp__exp__corr_rh = np.corrcoef(exp_fc_array_rh)
+                exp__exp_mean__corr_lh = np.sum(
+                        np.tril(exp__exp__corr_lh, k=-1)
+                        ).sum() / np.sum(range(no_of_persons))
+                exp__exp_mean__corr_rh = np.sum(
+                        np.tril(exp__exp__corr_rh, k=-1)
+                        ).sum() / np.sum(range(no_of_persons))
+            else:
+                exp__exp__corr_lh = exp__exp__corr_rh = np.nan
+                exp__exp_mean__corr_lh = exp__exp_mean__corr_rh = np.nan
 
             outfile.write(
                     ('exp__exp__corr_lh:\n'
