@@ -35,9 +35,9 @@ from pipeline import (TUTORIAL, fullscale_info, fullscale_fc, has_fullscale,  # 
 # the least active one. The same three areas in every run make them comparable.
 RASTER_AREAS_ALL = ["postcentral", "pericalcarine", "caudalanteriorcingulate"]
 RUNS = {
-    "thu_sub007_L": dict(t_switch=4400, raster_areas=RASTER_AREAS_ALL),
-    "thu_sub016_L": dict(t_switch=None, raster_areas=RASTER_AREAS_ALL),
-    "thu_sub011_R": dict(t_switch=None, raster_areas=RASTER_AREAS_ALL),
+    "sub007_L": dict(t_switch=4400, raster_areas=RASTER_AREAS_ALL),
+    "sub016_L": dict(t_switch=None, raster_areas=RASTER_AREAS_ALL),
+    "sub011_R": dict(t_switch=None, raster_areas=RASTER_AREAS_ALL),
 }
 DPI = 120
 T0 = 1000                    # ms, the first second is discarded from every statistic
