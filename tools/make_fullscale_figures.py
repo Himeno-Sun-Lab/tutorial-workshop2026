@@ -214,7 +214,7 @@ def render():
         ax0.axvline(T_SWITCH / 1000, c="k", ls=":")
     ax0.set_ylabel("rate (Hz)"); ax0.legend(fontsize=8, loc="upper right")
     im = ax1.imshow(area_rate.clip(lower=0.01).values, aspect="auto", cmap="magma",
-                    norm=LogNorm(vmin=0.01, vmax=area_rate.values.max()),
+                    interpolation="nearest", norm=LogNorm(vmin=0.01, vmax=area_rate.values.max()),
                     extent=[HEAT_T0 / 1000, t_sim / 1000, len(area_rate) - 0.5, -0.5])
     ax1.set_yticks(range(len(area_rate)), area_rate.index, fontsize=7)
     ax1.set_xlabel("time (s)")
@@ -299,7 +299,7 @@ def render_zoom(area_hist):
     rows = list(drop.index) + sorted(set(zoom.index) - set(drop.index))
     fig, ax = plt.subplots(figsize=(13, 8), layout="constrained")
     im = ax.imshow(zoom.loc[rows].clip(lower=0.01).values, aspect="auto", cmap="magma",
-                   norm=LogNorm(vmin=0.01, vmax=zoom.values.max()),
+                   interpolation="nearest", norm=LogNorm(vmin=0.01, vmax=zoom.values.max()),
                    extent=[Z0 / 1000, Z1 / 1000, len(rows) - 0.5, -0.5])
     ax.plot(drop.values, range(len(drop)), "c.", ms=5, label="end of activity (last time above half way, 20 ms smoothing)")
     ax.axhline(len(drop) - 0.5, c="w", lw=0.8)
@@ -324,7 +324,7 @@ def render_rest(area_hist, pop_hist, area_rate, level, t_sim):
         idx = [k for layer in layers for k in hist.index if k[1] == layer]
         mat = np.vstack([binned(hist[k], BIN, HEAT_T0) for k in idx])
         im = ax.imshow(np.clip(mat, 0.01, None), aspect="auto", cmap="magma",
-                       norm=LogNorm(vmin=0.01, vmax=max(mat.max(), 1)),
+                       interpolation="nearest", norm=LogNorm(vmin=0.01, vmax=max(mat.max(), 1)),
                        extent=[HEAT_T0 / 1000, t_sim / 1000, len(idx) - 0.5, -0.5])
         bounds = np.cumsum([sum(k[1] == layer for k in idx) for layer in layers])
         for b in bounds[:-1]:
@@ -442,7 +442,7 @@ def render_rest(area_hist, pop_hist, area_rate, level, t_sim):
     fig, axes = plt.subplots(1, 2, figsize=(9, 4), layout="constrained")
     for ax, (title, fc) in zip(axes, [("simulated (synaptic currents)", sim_fc),
                                       ("empirical, same person", exp_fc)]):
-        im = ax.imshow(fc.values, vmin=-1, vmax=1, cmap="RdBu_r")
+        im = ax.imshow(fc.values, vmin=-1, vmax=1, cmap="RdBu_r", interpolation="nearest")
         ax.set_xticks([]); ax.set_yticks([]); ax.set_title(title, fontsize=10)
     fig.colorbar(im, ax=axes, shrink=0.8, label="correlation")
     save(fig, "fc_matrices.png")

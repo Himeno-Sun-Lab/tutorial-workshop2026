@@ -1,0 +1,230 @@
+{
+  "switch_detected": {
+    "t": 2160,
+    "rate_ratio": 5.544091553955055
+  },
+  "states": {
+    "t_switch": 2160,
+    "quiet_episodes": [
+      [
+        2180,
+        2860
+      ],
+      [
+        3060,
+        6140
+      ],
+      [
+        6480,
+        6800
+      ],
+      [
+        7040,
+        7480
+      ],
+      [
+        7560,
+        7900
+      ],
+      [
+        7980,
+        8420
+      ],
+      [
+        8540,
+        8960
+      ],
+      [
+        9480,
+        9880
+      ]
+    ],
+    "quiet_fraction": 0.68,
+    "changes": 16,
+    "intervals": {
+      "active": [
+        [
+          1000,
+          2180
+        ],
+        [
+          2960,
+          3060
+        ],
+        [
+          6240,
+          6480
+        ],
+        [
+          6900,
+          7040
+        ],
+        [
+          8520,
+          8540
+        ],
+        [
+          9060,
+          9480
+        ],
+        [
+          9980,
+          10000
+        ]
+      ],
+      "quiet": [
+        [
+          2280,
+          2860
+        ],
+        [
+          3160,
+          6140
+        ],
+        [
+          6580,
+          6800
+        ],
+        [
+          7140,
+          7480
+        ],
+        [
+          7660,
+          7900
+        ],
+        [
+          8080,
+          8420
+        ],
+        [
+          8640,
+          8960
+        ],
+        [
+          9580,
+          9880
+        ]
+      ]
+    }
+  },
+  "info": {
+    "N_scaling": "1.0",
+    "K_scaling": "1.0",
+    "scaling_type": "linear",
+    "neurons": "3468839",
+    "internal synapses": "4.28e+10",
+    "eta_ext": "1.1",
+    "cc_scalingEtoE / EtoI": "2.5 / 5.0",
+    "neuron types": "none",
+    "connectome": "sub016_L.mat",
+    "t_sim (ms)": "10000.0",
+    "master_seed": "2903",
+    "network hash": "524163f477f4e6c07d5d160a51d78ab3",
+    "simulation hash": "34574788f935bb5edb888e616bf56d55",
+    "analysis hash": "81f3c81622512347ceb8f59dcd394c41"
+  },
+  "whole_run": {
+    "E": 1.141141414070094,
+    "I": 4.127756597188473
+  },
+  "rates_active": {
+    "E": 2.818819449475407,
+    "I": 9.62194820177286,
+    "silent": 21,
+    "fastest": 147.52500748727164
+  },
+  "rates_quiet": {
+    "E": 0.36991494479284265,
+    "I": 1.671680757086236,
+    "silent": 0,
+    "fastest": 8.18140589569161
+  },
+  "drop": {
+    "n_areas": 19,
+    "first": [
+      "superiorparietal",
+      "precuneus",
+      "cuneus"
+    ],
+    "first_t": 2.1525,
+    "spread_ms": 30.00000000000025,
+    "spread80_ms": 18.000000000000238,
+    "no_drop": [
+      "bankssts",
+      "caudalanteriorcingulate",
+      "caudalmiddlefrontal",
+      "frontalpole",
+      "inferiorparietal",
+      "lateralorbitofrontal",
+      "paracentral",
+      "parsopercularis",
+      "parsorbitalis",
+      "parstriangularis",
+      "postcentral",
+      "rostralanteriorcingulate",
+      "rostralmiddlefrontal",
+      "superiorfrontal",
+      "transversetemporal"
+    ]
+  },
+  "raster_areas": [
+    "postcentral",
+    "pericalcarine",
+    "caudalanteriorcingulate"
+  ],
+  "raster_window": [
+    1000,
+    4000
+  ],
+  "stats_active": {
+    "median": {
+      "rate": {
+        "E": 0.035,
+        "I": 1.832
+      },
+      "cv": {
+        "E": 0.639,
+        "I": 0.627
+      },
+      "cc": {
+        "E": 0.011,
+        "I": 0.005
+      }
+    },
+    "pops_rate_above_10": 31,
+    "max_rate": 147.52500748727164,
+    "pops_cv_above_1_2": 2,
+    "pops_cc_above_0_1": 30,
+    "max_cc": 0.8607596460217907
+  },
+  "stats_quiet": {
+    "median": {
+      "rate": {
+        "E": 0.127,
+        "I": 1.019
+      },
+      "cv": {
+        "E": 0.731,
+        "I": 0.715
+      },
+      "cc": {
+        "E": 0.001,
+        "I": -0.0
+      }
+    },
+    "pops_rate_above_10": 0,
+    "max_rate": 8.18140589569161,
+    "pops_cv_above_1_2": 0,
+    "pops_cc_above_0_1": 0,
+    "max_cc": 0.06887977898561408
+  },
+  "fc": {
+    "whole": -0.07752566929674669,
+    "active": 0.2816125699247109,
+    "quiet": 0.012450143363294149,
+    "sim_mean": 0.8882236088894112,
+    "exp__sim_syn__corr_rh": -0.07752566929674688,
+    "exp__sim_bold__corr_rh": 0.28094274985337997
+  }
+}
