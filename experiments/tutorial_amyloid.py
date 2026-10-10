@@ -91,10 +91,12 @@ net_params["neuron_types"] = {
 #  sim_params - what HAPPENS to it
 # ===========================================================================
 sim_params = {
-    # Biological time, in ms. The first second is discarded as a transient, so
-    # this leaves 4 s of usable signal - enough for spectra above ~2 Hz, not
-    # enough for BOLD. Cluster runs use tens of seconds.
-    "t_sim": 5000.0,
+    # Biological time, in ms: 4000, read from tutorial_CN.py. Every analysis
+    # window ends at t_sim, so the two runs are only comparable at the same
+    # length. The first second is discarded as a transient, so this leaves 3 s
+    # of usable signal - enough for spectra above ~2 Hz, not enough for BOLD.
+    # Cluster runs use tens of seconds.
+    "t_sim": _CN["sim_params"]["t_sim"],
 
     # Seeds connectivity, weights, delays, the Poisson background and the
     # initial membrane potentials. Change it and you get a different sample of

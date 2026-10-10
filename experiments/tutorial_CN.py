@@ -77,7 +77,7 @@ net_params = {
 # ===========================================================================
 sim_params = {
     # Biological time, in ms. The first second is discarded as a transient, so
-    # this leaves 4 s of usable signal - enough for spectra above ~2 Hz, not
+    # this leaves 3 s of usable signal - enough for spectra above ~2 Hz, not
     # enough for BOLD. Cluster runs use tens of seconds.
     "t_sim": 4000.0,
 
