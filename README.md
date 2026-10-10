@@ -12,8 +12,7 @@ run it, and how to read what comes out. It is deliberately *not* a walkthrough o
 the model is treated the way you would treat any scientific instrument.
 
 At full scale it has 3.47 M neurons and 42.8 G synapses. The tutorial runs the same model,
-downscaled by a factor of 2000, on a laptop, then shows how to send the full-scale version to a
-cluster.
+downscaled, on a laptop, then shows a full-scale run computed on a server.
 
 ## The interface you learn
 
@@ -24,22 +23,32 @@ experiments/my_experiment.py         you write this: three dictionaries
   network  ->  simulate  ->  analyse        three commands
         |
         v
-results/<hash>/<hash>/<hash>/plots/   ~200 figures and a set of result files
+results/<run>/<hash>/<hash>/<hash>/plots/   ~200 figures and a set of result files
 ```
+
+On the laptop every run starts from scratch: `run_all("tutorial_CN")` empties `results/tutorial_CN/`
+and runs all three stages again, so nothing is reused between runs or shared between experiments.
+Reuse - re-running only the stages whose parameters changed - belongs to the server's Snakemake
+workflow, where the full-scale runs were computed. Participants do not run anything there: the
+notebook shows three such runs, as figures rendered from the runs themselves (`figures/fullscale/`).
 
 ## Contents
 |File|Detail|
 |---|---|
-| `Cortical_Model_Tutorial.ipynb` | The tutorial. 56 cells, English |
+| `Cortical_Model_Tutorial.ipynb` | The tutorial. 108 cells, English |
 | `environment.yml` | The conda environment, pinned — `mamba env create -f environment.yml` |
 | `experiments/tutorial_CN.py` | Healthy cortex — a fully commented experiment file, the model's control panel |
-| `experiments/tutorial_AD.py` | The same network with an amyloid-PET-derived pathology distribution |
-| `experiments/tutorial_subject.py` | One ADNI participant, individualised end to end: their connectome, their amyloid map, their fMRI as the comparison target |
-| `tools/eta_ext_search.py` | Calibrates the external drive for a downscaled network (see Part 3) |
+| `experiments/tutorial_amyloid.py` | The same network with an amyloid-PET-derived pathology distribution |
+| `experiments/fullscale_rates/` | Full-scale rates for each experiment, from which the downscaling DC compensation is computed |
+| `tools/fullscale_rates.py` | Generates those rates by self-consistent iteration; re-run after changing an experiment's drive, weights or anatomy |
+| `tools/eta_ext_search.py` | Calibrates the external drive for a downscaled network (see Appendix A) |
+| `tools/pipeline.py` | The notebook's plumbing: paths, running an experiment from scratch, the hash files, loading the figures and tables of a laptop run or the imported full-scale run |
 | `model/` | The model: source and all the data it reads. A snapshot — see `model/README.md` |
-| `model/experimental_data/ADNI/` | One complete participant: structural connectivity, resting-state BOLD and amyloid-PET — see its README |
-| `cluster/submit_model.sh` | Self-contained SLURM job: clones this repository on the cluster, writes full-scale experiment files, runs the three stages |
-| `results/` | Created on the first run. Safe to delete |
+| `model/experimental_data/amyloid/` | The amyloid data: the amyloid-PET map of the amyloid experiment, and one participant's structural connectivity and resting-state BOLD — see its README |
+| `figures/fullscale/<run>/` | The figures of Part 6.2, rendered from the full-scale runs, and the numbers the text quotes (`numbers.json`) |
+| `tools/make_fullscale_figures.py` | For developers: re-renders `figures/fullscale/` from the runs in `fullscale/` - see below |
+| `fullscale/` | Three full-scale runs from the server, imported unchanged. **Local only, gitignored** - see below |
+| `results/` | Created on the first run, one folder per run. Safe to delete |
 
 Nothing writes into `model/`: every run puts its output in `results/`, which is gitignored.
 
@@ -67,8 +76,8 @@ Docker image) and attach VS Code with the WSL extension.
 simulation is ~19 s of full-throttle multicore compute. If a cell seems to hang for minutes, you are
 probably swapping; stop it and use a smaller network (Part 2).
 
-Compute time is about **8 minutes**, in three marked blocks: two full pipeline runs (~3 min each)
-and an optional seed check (~80 s).
+Compute time is about **12 minutes**, in three marked blocks: two full pipeline runs (~3 min each)
+and an optional seed check (~6 min - every extra seed builds and simulates its own network).
 
 
 ## Quick start
@@ -97,7 +106,7 @@ cannot bundle.
 
 ### Running a smaller or larger model
 
-Edit `N_scaling` in `experiments/tutorial_CN.py` (and `tutorial_AD.py`):
+Edit `N_scaling` in `experiments/tutorial_CN.py` (and `tutorial_amyloid.py`):
 
 | `N_scaling` | Neurons | Synapses | Peak RAM | Simulate 5 s |
 |---|---|---|---|---|
@@ -106,41 +115,63 @@ Edit `N_scaling` in `experiments/tutorial_CN.py` (and `tutorial_AD.py`):
 | 0.02 | 69 k | 86 M | ~10.6 GB | ~75 s |
 
 Hold `K_scaling` at 0.1 — it is the knob that changes the dynamics, and 0.1 is the value the project
-validates. See Part 3 of the notebook.
+validates. See Appendix A of the notebook.
 
 ## What the tutorial covers
 
-1. Requirements, installation, platform caveats
-2. **What the model represents** — three scales, the data behind every number, the neuron and
+0. **Quick start** — environment, a one-click check that NEST works
+1. **What the model represents** — architecture, the data behind every number, the neuron and
    synapse equations, and what each simulated signal maps onto experimentally
-3. **The control panel** — the three parameter dictionaries and the knobs that matter
-4. **Downscaling** — the mean/variance argument, why a careless downscale produces a *silent*
-   network, and how to recalibrate the drive
-5. **Amyloid-beta** — from an amyloid-PET map to model parameters
-6. **Running the model** — the three-stage pipeline and hash-addressed results
-7. **Reading the output** — the pipeline's own figures, in the order you should consult them, plus a
+2. **The control panel** — the experiment file, its key parameters, and choosing a size for your machine
+3. **Running the model** — the three-stage pipeline and hash-addressed results
+4. **Reading the output** — the pipeline's own figures, in the order you should consult them, plus a
    reusable checklist
-8. **The experiment** — healthy vs amyloid, and a seed check that decides which differences are real
-9. **Beyond the laptop** — Snakemake, job sizing, and the SLURM batch job
-10. Exercises, troubleshooting, references
+5. **Your own data** — a connectome, a comparison target, a pathology map, your own neuron parameters
+6. **Beyond the laptop** — the Snakemake workflow, and three full-scale runs (6.2) in three different
+   network states, shown as pre-rendered figures
+then references, troubleshooting, and two appendices: **A** downscaling and recalibrating the drive;
+**B** amyloid-beta - from an amyloid-PET map to model parameters, a healthy-vs-amyloid experiment
+with a seed check that decides which differences are real, and one person's amyloid map.
 
 ## Calibrating the external drive
 
-Downscaling leaves the mean synaptic drive short, and at the default `eta_ext = 1.1` a downscaled
-network emits nothing at all. `tools/eta_ext_search.py` finds the drive that fixes it:
+Downscaling keeps only `sqrt(K_scaling)` of the mean synaptic input; the model restores the rest as a
+DC current computed from the rates of the *full-scale* network (`fullscale_rates`). Those rates must
+belong to the configuration being run, and they depend on `eta_ext`, so the experiments ship their
+own, generated by self-consistent iteration (rates → DC → simulate → rates):
+
+```bash
+python tools/fullscale_rates.py experiments/tutorial_CN.py --iters 40 \
+    --out experiments/fullscale_rates/tutorial_CN.pkl      # ~9 min at N_scaling = K_scaling = 0.01
+```
+
+Re-run it for an experiment whenever you change its drive, weights or anatomy. `eta_ext` itself sets
+the working point; `tools/eta_ext_search.py` scans it. Like `fullscale_rates.py` it reads the
+experiment file itself - every `net_params` entry, its full-scale rates and its `master_seed` - and
+varies only `eta_ext`; flags such as `--n-scaling` or `--seeds` override single values:
 
 ```bash
 cd ~/Codes/Cortical-Model-Tutorial
 
+python tools/eta_ext_search.py --experiment experiments/tutorial_CN.py \
+    --method scan --eta-list 4.0 4.5 5.0 5.5     # the experiment as it is
 python tools/eta_ext_search.py                   # simulate + bisect (default)
 python tools/eta_ext_search.py --method analytic # instant closed-form estimate
 python tools/eta_ext_search.py --method theory   # NNMT mean-field, ~5 s per point
 python tools/eta_ext_search.py --help
 ```
 
-Measured at `N_scaling = 0.005, K_scaling = 0.1`: the network is silent below `eta_ext` **1.38**, and
-reaches the 3–5 Hz excitatory target band at **3.45** — the value the tutorial experiments use.
-Results and a rate-vs-`eta_ext` figure go to `results/eta_search/`.
+Measured at `N_scaling = 0.005, K_scaling = 0.1` with self-consistent full-scale rates
+(population means; E 3–5 Hz and I 5–15 Hz are the target bands):
+
+| `eta_ext` | 1.1 | 2.0 | 3.0 | 4.5 | **5.0** | 5.5 | 7.0 |
+|---|---|---|---|---|---|---|---|
+| E (Hz) | 0.31 | 0.86 | 1.66 | 2.99 | **3.58** | 3.81 | 5.11 |
+| I (Hz) | 1.5 | 4.3 | 7.5 | 12.2 | **13.7** | 15.1 | 19.7 |
+
+Both bands hold only for `eta_ext` ≈ 4.5–5.4; the experiments use **5.0** (CN E 3.58 Hz, I 13.7 Hz;
+amyloid E 3.46 Hz, I 14.0 Hz, at seed 2903). Results and a
+rate-vs-`eta_ext` figure go to `results/eta_search/`.
 
 ## Distributing this
 
@@ -158,22 +189,58 @@ A participant needs exactly three things:
 
 plus 8–16 GB RAM, ~10 GB free disk (~120 MB per completed run), and Linux/macOS or WSL2 on Windows.
 
-`results/`, the pipeline's stage markers and generated seed variants are gitignored, so the
+`results/` (every laptop run, with its own stage markers) and `fullscale/` are gitignored, so the
 repository stays at its clone size however many runs you do.
 
 **On the bundled copy.** `model/` is a snapshot, not a submodule: it does not track the upstream
 model and will not receive its fixes. Refresh it by copying the source and data directories over
-again. The amyloid distribution in `model/experimental_data/abeta/` is derived from ADNI data, whose
+again. The amyloid data in `model/experimental_data/amyloid/` are derived from ADNI data, whose
 data use agreement applies wherever this repository is shared.
+
+## The full-scale result
+
+Part 6.2 of the notebook shows three full-scale runs - 3.47 M neurons, 42.8 G synapses, 10 s each -
+computed on our server with Snakemake: `sub007_L`, `sub016_L` and `sub011_R`, one
+hemisphere each of three participants of the THU glioma cohort, each on that person's own connectome
+and compared against their own resting-state BOLD. All parameters but the connectome are identical,
+and the three end up in different network states: one switches once from a bursting to a quiet state,
+one switches back and forth, one never leaves the bursting state. The two that switch have the
+cohort's highest and lowest correlation between the FC of the simulated synaptic currents and the
+person's fMRI (r = 0.47 and -0.08; median 0.20); Part 6.2 shows what those numbers do and do not mean.
+
+The notebook shows them as figures in `figures/fullscale/<run>/`; nothing else is needed to read
+Part 6.2.
+
+**For developers: re-rendering the figures.** The figures, and the numbers the notebook text quotes
+(`numbers.json`), are rendered by `tools/make_fullscale_figures.py`. Participants never run it, and
+the notebook does not refer to it. It needs the runs themselves, imported exactly as the workflow
+wrote them, so their hashes still name their directories; only the files in `experiments/` and
+`logs/` are named after the run, `sub<NNN>_<L|R>` (shown for `sub007_L`):
+
+```
+fullscale/experiments/sub007_L.py                                     the experiment file
+fullscale/experiments/sub007_L.{network,simulation,analysis}_hash
+fullscale/out/<net_hash>/<sim_hash>/<ana_hash>/                       all three levels, spikes included
+fullscale/logs/sub007_L_*                                             the Snakemake rule logs
+fullscale/experimental_data/thu-glioma/thumatrix/sub007_L.npy         the person's BOLD, under its server path
+```
+
+The runs are patient-derived and therefore **not part of the repository** (`fullscale/` is
+gitignored); the rendered figures are. Another run goes in the same way: copy its
+experiment file and hash files into `fullscale/experiments/` under the run's name, its `<net_hash>/` tree into
+`fullscale/out/`, the BOLD file its `ana.yaml` names into `fullscale/experimental_data/` under the
+same relative path, add it to `RUNS` in `tools/make_fullscale_figures.py`, re-run the script and
+commit `figures/fullscale/`.
 
 ## Individual data
 
-`model/experimental_data/ADNI/` holds one complete participant (`023_S_6661`): structural
-connectivity from diffusion MRI, 835 frames of resting-state BOLD, and an amyloid-PET-derived burden
-map — all in the same 34-area Desikan-Killiany parcellation the model uses.
-`experiments/tutorial_subject.py` wires the three together, so the simulated functional connectivity
-becomes a prediction about *that person*, checkable against *their own* fMRI. Part 7.4 of the
-notebook runs it (opt-in) and discusses what it does to the working point.
+`model/experimental_data/amyloid/` holds the amyloid-PET-derived burden map of the amyloid
+experiment (`amyloid_ratio.csv`, the `ratio_E` of its `"Abeta"` neuron type), and one participant's
+structural connectivity from diffusion MRI (`amyloid_SC.mat`) and 835 frames of resting-state BOLD
+(`amyloid_bold.npy`) — all in the same 34-area Desikan-Killiany parcellation the model uses. Point
+`predictive_connectomic_params["con_path"]` and `ana_params["experimental_fc"]` of an experiment at
+the last two to simulate that person and compare against their own fMRI. The amyloid map comes
+from a different ADNI participant; replace it with the person's own map for a fully individual model.
 
 ADNI's Data Use Agreement applies to this data wherever the repository is shared, and requires the
 standard ADNI acknowledgement in any publication.
