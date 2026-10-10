@@ -29,7 +29,7 @@ net_params = {
     # memory) scale as the product. K_scaling is the one that changes the
     # dynamics, so we keep it at the value the project validates and shrink
     # N_scaling instead. See Appendix A of the notebook.
-    "N_scaling": 0.01,      # 17 k neurons
+    "N_scaling": 0.01,      # 34.7 k neurons, 4.3e7 synapses (~5.9 GB)
     "K_scaling": 0.1,        # in-degree ~1250 instead of ~12500
     "scaling_type": "sqrt",  # weights scale as 1/sqrt(K_scaling)
 
@@ -52,7 +52,8 @@ net_params = {
     # ---- connection strength ----------------------------------------------
     # Cortico-cortical excitatory weights, relative to the local ones. These two
     # are the main knobs the project uses to move the network between a quiet
-    # ground state and a metastable one.
+    # ground state and a metastable one. 2.5 / 5.0 equals the repository
+    # default; it is set here so that the control panel shows it.
     "scaling_factors_recurrent": {
         "cc_scalingEtoE": 2.5,
         "cc_scalingEtoI": 2.0 * 2.5,
