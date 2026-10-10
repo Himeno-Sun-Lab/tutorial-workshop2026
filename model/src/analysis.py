@@ -1114,24 +1114,27 @@ class Analysis():
             I_syn_ex = pd.DataFrame(ex_arr, index=idx, columns=t)
             I_syn_in = pd.DataFrame(in_arr, index=idx, columns=t)
 
-            # Aggregate to (area, layer) level by summing across populations.
-            # LFP proxy formula is applied once per layer, not per population,
-            # consistent with Mazzoni et al.  Sign is preserved (no abs) so
-            # that oscillatory phase information is retained for coherence.
-            I_syn_ex_layer = I_syn_ex.groupby(level=['area', 'layer']).sum()
-            I_syn_in_layer = I_syn_in.groupby(level=['area', 'layer']).sum()
-            # Mazzoni et al. 2015 (PLoS Comput Biol 11(12):e1004584), Table 1 /
-            # Eq 4, "Reference Weighted Sum" (RWS) LFP proxy:
-            #   LFP(t) = AMPA(t - 6 ms) [+/-] 1.65 * GABA(t)
-            # i.e. the excitatory (AMPA-like) current leads the inhibitory
-            # (GABA-like) current by a fixed 6 ms (tau_AMPA = 6 ms, tau_GABA = 0
-            # in the paper). This is a paper-derived constant, not a simulation
-            # parameter, so it is hardcoded rather than exposed via ana_dict.
+            # Mazzoni et al. 2015 (PLoS Comput Biol 11(12):e1004584), Eq 4,
+            # "Reference Weighted Sum" (RWS) LFP proxy:
+            #   LFP(t) = Norm[ sum_pyr AMPA(t - 6 ms) - 1.65 * sum_pyr GABA(t) ]
+            # - Only the input onto excitatory (pyramidal) neurons enters:
+            #   they generate the LFP. AMPA includes the external input, which
+            #   NEST's I_syn_ex does.
+            # - Sign convention of the paper: AMPA currents positive, GABA
+            #   currents negative, as NEST records them. The two contribute to
+            #   the LFP with the same sign, so AMPA - 1.65 * GABA adds their
+            #   magnitudes.
+            # - tau_AMPA = 6 ms, tau_GABA = 0, alpha = 1.65 are the paper's
+            #   fixed values, hardcoded rather than exposed via ana_dict.
+            # Summed per (area, layer), then z-scored (Norm).
+            is_E = I_syn_ex.index.get_level_values('pop') == 'E'
+            I_syn_ex_layer = I_syn_ex[is_E].groupby(level=['area', 'layer']).sum()
+            I_syn_in_layer = I_syn_in[is_E].groupby(level=['area', 'layer']).sum()
             AMPA_DELAY_MS = 6.0
             I_syn_ex_layer_delayed = _delay_signal(
                 I_syn_ex_layer.values, rec_interval, AMPA_DELAY_MS)
             lfp = pd.DataFrame(
-                I_syn_ex_layer_delayed + 1.65 * I_syn_in_layer.values,
+                I_syn_ex_layer_delayed - 1.65 * I_syn_in_layer.values,
                 index=I_syn_ex_layer.index, columns=t
             )
             z = lfp.apply(lambda row: (row - row.mean()) / row.std(), axis=1)
@@ -1155,10 +1158,13 @@ class Analysis():
         Calculate LFP proxy at (area, layer) level using PSC kernel convolution
         on spike data. Controlled by ana_dict['fast_lfp_kernel'] (bool):
 
-            True  (default): convolves population-averaged rate_hist at binsize
+            True            : convolves population-averaged rate_hist at binsize
                              resolution — fast, lower Nyquist frequency ceiling.
-            False           : builds spike trains at sim_resolution from raw
+            False (default) : builds spike trains at sim_resolution from raw
                              spike times — slower, full frequency resolution.
+
+        Only the input onto excitatory populations enters (Mazzoni et al.
+        2015, see _kernelLayerCurrent).
 
         Returns a signed z-scored oscillatory signal (no abs) suitable for
         coherence analysis. Phase information is preserved.
@@ -1205,6 +1211,7 @@ class Analysis():
         (lfp_layer, NN) : tuple
             lfp_layer : pd.DataFrame, MultiIndex (area, layer), columns = time (ms)
             NN        : pd.Series,    MultiIndex (area, layer, pop), neuron counts
+                                      of the excitatory populations
         """
         if hasattr(self, '_lfp_layer_current'):
             return self._lfp_layer_current, self._lfp_layer_NN
@@ -1327,8 +1334,13 @@ class Analysis():
         # Weighted input rates per target, then one convolution per target with
         # the kernel of the target's synapses (tau_syn belongs to the receiving
         # neuron, and is mixed over its neuron types).
+        # Only the input onto excitatory (pyramidal) neurons enters the proxy
+        # (Mazzoni et al. 2015): rows are the excitatory target populations.
         try:
             w_signed = weights * indeg
+            is_E = w_signed.index.get_level_values(-1) == 'E'
+            w_signed = w_signed[is_E]
+            NN = NN[is_E]
             I_ex = self._filterInputRates(
                 w_signed.clip(lower=0).dot(rates_df), 'tau_syn_ex', dt_lfp)  # positive (E sources)
             I_in = self._filterInputRates(
@@ -1340,20 +1352,24 @@ class Analysis():
                     e, exc_info=True)
             raise
 
-        # Mazzoni et al. 2015 (PLoS Comput Biol 11(12):e1004584), Table 1 /
-        # Eq 4, "Reference Weighted Sum" (RWS) LFP proxy: the excitatory
-        # (AMPA-like) current leads the inhibitory (GABA-like) current by a
-        # fixed 6 ms (tau_AMPA = 6 ms, tau_GABA = 0). Paper-derived constant,
-        # not a simulation parameter, hence hardcoded rather than exposed via
-        # ana_dict.
+        # Mazzoni et al. 2015 (PLoS Comput Biol 11(12):e1004584), Eq 4,
+        # "Reference Weighted Sum" (RWS) LFP proxy:
+        #   LFP(t) = Norm[ sum_pyr AMPA(t - 6 ms) - 1.65 * sum_pyr GABA(t) ]
+        # with the paper's sign convention, AMPA currents positive and GABA
+        # currents negative (as I_ex / I_in are here): the two contribute to
+        # the LFP with the same sign, and the difference adds their
+        # magnitudes. tau_AMPA = 6 ms, tau_GABA = 0 and alpha = 1.65 are the
+        # paper's fixed values. The paper's AMPA also includes the external
+        # input; here that is a constant-rate Poisson drive, which contributes
+        # no fluctuation the kernel could carry and drops out in the z-score.
         AMPA_DELAY_MS = 6.0
         I_ex_delayed = pd.DataFrame(
             _delay_signal(I_ex.values, dt_lfp, AMPA_DELAY_MS),
             index=I_ex.index, columns=I_ex.columns
         )
 
-        # Signed net current: no abs to preserve oscillatory phase for coherence
-        lfp_pop   = I_ex_delayed + 1.65 * I_in
+        # Signed: no abs, so that oscillatory phase is kept for coherence
+        lfp_pop   = I_ex_delayed - 1.65 * I_in
         lfp_layer = (lfp_pop.mul(NN, axis=0)
                              .groupby(level=[0, 1]).sum()
                              .div(NN.groupby(level=[0, 1]).sum(), axis=0))
@@ -1367,8 +1383,9 @@ class Analysis():
         """
         ROI (area)-level LFP-like proxy from the kernel method.
 
-        Aggregates the per-(area, layer) signed synaptic current across *all*
-        layers and populations of each area, NN-weighted and *before* any
+        Aggregates the per-(area, layer) signed synaptic current across all
+        layers of each area - the input onto its excitatory populations, as
+        the proxy is defined (see _kernelLayerCurrent) - NN-weighted and *before* any
         z-scoring, then z-scores once per area.  Aggregating before
         normalisation is required: ``lfp_proxy_kernel.pkl`` is z-scored per
         layer (unit variance in every row), so averaging those rows would be
