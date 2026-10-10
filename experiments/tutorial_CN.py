@@ -49,10 +49,11 @@ net_params = {
     # 1.1 is the repository default and the drive of the full-scale runs
     # (notebook Part 6). The downscaled network does not reproduce the
     # full-scale working point at the same drive (notebook Appendix A.5): at 1.1
-    # it sits at E ~0.3 Hz, so its drive is calibrated on its own. 5.0 sits in the middle
-    # of the window (~4.5-5.4) where both target bands hold, and puts the network
-    # at E ~3.5 Hz, I ~13.1 Hz - which is exactly the state the fullscale_rates
-    # file above holds (E mean 3.49 Hz, I mean 13.12 Hz), so the two must be
+    # it sits at E ~0.3 Hz, so its drive is calibrated on its own. Of the scan
+    # 4.5 / 5.0 / 5.5, only 5.0 holds both target bands (4.5: E 2.3 Hz; 5.5:
+    # I 17.9 Hz), and puts the network at E ~3.5 Hz, I ~13.4 Hz - which is the
+    # state the fullscale_rates file above holds (E mean 3.54 Hz, I mean
+    # 13.41 Hz, 26 damped iterations at this drive), so the two must be
     # changed together: the DC compensation is computed from those rates, and
     # pairing them with a weaker drive leaves every neuron ~50 mV below
     # threshold and the network silent after the transient.
