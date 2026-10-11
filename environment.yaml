@@ -39,7 +39,7 @@ dependencies:
   - pip
   - pip:
       # Hash-addressed output directories. Not on conda-forge.
-      - dicthash==0.0.1
+      - dicthash==0.0.2
       # Mean-field theory, used by tools/eta_ext_search.py --method theory.
       - nnmt==1.3.0
 
